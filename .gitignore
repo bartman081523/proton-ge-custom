@@ -6,3 +6,7 @@
 
 /.vagrant/
 /vagrant_share/
+
+/GE-Proton*
+/wine-build/
+/prefix_stock/

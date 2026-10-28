@@ -316,6 +316,9 @@ apply_all_in_dir() {
 ### END GAME PATCH SECTION ###
 
 ### (2-5) WINE HOTFIX/BACKPORT SECTION ###
+    echo "WINE: -HOTFIX- WinRT, WinUI XAML runtime, AppModel, and Redhawk interop (MSIX apps)"
+    apply_all_in_dir "../patches/wine-hotfixes/uwp-winui/"
+
     echo "WINE: -HOTFIX- Fix Smart Tee negotiation and V4L WoW64 media type marshaling"
     apply_all_in_dir "../patches/wine-hotfixes/qcap-dshow-fixes/"
 
