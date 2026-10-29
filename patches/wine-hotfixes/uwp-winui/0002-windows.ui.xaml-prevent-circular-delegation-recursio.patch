@@ -1,0 +1,35 @@
+From 3ce45cb05716b47c2b48441391d86a02d258fc07 Mon Sep 17 00:00:00 2001
+From: BuildBot <build@example.com>
+Date: Wed, 28 Oct 2026 18:02:17 +0100
+Subject: [PATCH 2/3] windows.ui.xaml: prevent circular delegation recursion on
+ IComponentConnector
+
+---
+ dlls/windows.ui.xaml/application.c | 11 ++---------
+ 1 file changed, 2 insertions(+), 9 deletions(-)
+
+diff --git a/dlls/windows.ui.xaml/application.c b/dlls/windows.ui.xaml/application.c
+index 5487b8c7d74..defc1c5dc6f 100644
+--- a/dlls/windows.ui.xaml/application.c
++++ b/dlls/windows.ui.xaml/application.c
+@@ -3731,15 +3731,8 @@ static HRESULT page_QI_internal(struct page_impl *impl, REFIID riid, void **ppvO
+     if (IsEqualGUID(riid, &IID_IComponentConnector_local) ||
+         IsEqualGUID(riid, &IID_IComponentConnector2_local))
+     {
+-        if (impl->outer)
+-        {
+-            void **ovtbl = *(void ***)impl->outer;
+-            if (ovtbl && (ULONG_PTR)ovtbl[0] > 0x10000)
+-            {
+-                HRESULT (WINAPI *pQI)(void *, REFIID, void **) = (void *)ovtbl[0];
+-                return pQI(impl->outer, riid, ppvObject);
+-            }
+-        }
++        /* Avoid ping-pong recursion with outer CCW wrapper */
++        return E_NOINTERFACE;
+     }
+ 
+     TRACE("page %p: unhandled QI %s\n", impl, debugstr_guid(riid));
+-- 
+2.56.0
+
