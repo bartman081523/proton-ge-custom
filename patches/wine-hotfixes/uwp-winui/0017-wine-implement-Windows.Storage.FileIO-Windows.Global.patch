@@ -1,0 +1,2973 @@
+From 76eab6352736e145dbd38866f9a2ec810c322547 Mon Sep 17 00:00:00 2001
+From: BuildBot <build@example.com>
+Date: Mon, 2 Nov 2026 21:20:35 +0100
+Subject: [PATCH 17/17] wine: implement Windows.Storage.FileIO,
+ Windows.Globalization.DateTimeFormatter, and IPackage3.InstalledDate for UWP
+ bootflow
+
+Signed-off-by: BuildBot <build@example.com>
+---
+ dlls/combase/roapi.c                          |   10 +
+ dlls/windows.applicationmodel/package.c       |   87 ++
+ dlls/windows.globalization/main.c             |  249 ++++
+ .../applicationdata.c                         |  708 ++++++++++-
+ dlls/windows.storage/file.c                   | 1041 +++++++++++++++++
+ dlls/windows.storage/main.c                   |    2 +
+ dlls/windows.storage/private.h                |    1 +
+ dlls/windows.ui.xaml/application.c            |  139 ++-
+ dlls/windows.ui.xaml/controls.c               |  423 ++++++-
+ dlls/windows.ui.xaml/private.h                |   16 +
+ 10 files changed, 2610 insertions(+), 66 deletions(-)
+
+diff --git a/dlls/combase/roapi.c b/dlls/combase/roapi.c
+index 97140f5856b..950ab4a3b4b 100644
+--- a/dlls/combase/roapi.c
++++ b/dlls/combase/roapi.c
+@@ -160,6 +160,16 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
+             *out = wcsdup(L"windows.storage.applicationdata.dll");
+             return S_OK;
+         }
++        if (!wcsncmp(classid, L"Windows.Storage.ApplicationData", 30))
++        {
++            *out = wcsdup(L"windows.storage.applicationdata.dll");
++            return S_OK;
++        }
++        if (!wcsncmp(classid, L"Windows.Storage.", 16))
++        {
++            *out = wcsdup(L"windows.storage.dll");
++            return S_OK;
++        }
+         if (!wcsncmp(classid, L"Windows.Globalization.", 22))
+         {
+             *out = wcsdup(L"windows.globalization.dll");
+diff --git a/dlls/windows.applicationmodel/package.c b/dlls/windows.applicationmodel/package.c
+index a329abf3433..c93c2fc5e38 100644
+--- a/dlls/windows.applicationmodel/package.c
++++ b/dlls/windows.applicationmodel/package.c
+@@ -377,6 +377,7 @@ static const struct IStorageItemVtbl storage_item_vtbl =
+ struct package
+ {
+     IPackage IPackage_iface;
++    IPackage3 IPackage3_iface;
+     LONG ref;
+ };
+ 
+@@ -385,6 +386,11 @@ static inline struct package *impl_from_IPackage( IPackage *iface )
+     return CONTAINING_RECORD( iface, struct package, IPackage_iface );
+ }
+ 
++static inline struct package *impl_from_IPackage3( IPackage3 *iface )
++{
++    return CONTAINING_RECORD( iface, struct package, IPackage3_iface );
++}
++
+ static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void **out )
+ {
+     struct package *impl = impl_from_IPackage( iface );
+@@ -401,6 +407,13 @@ static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void
+         return S_OK;
+     }
+ 
++    if (IsEqualGUID( iid, &IID_IPackage3 ))
++    {
++        *out = &impl->IPackage3_iface;
++        IInspectable_AddRef( *out );
++        return S_OK;
++    }
++
+     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+     *out = NULL;
+     return E_NOINTERFACE;
+@@ -688,6 +701,79 @@ static const struct IPackageVtbl package_vtbl =
+     package_get_Dependencies,
+ };
+ 
++static HRESULT WINAPI package3_QueryInterface( IPackage3 *iface, REFIID iid, void **out )
++{
++    struct package *impl = impl_from_IPackage3( iface );
++    return package_QueryInterface( &impl->IPackage_iface, iid, out );
++}
++
++static ULONG WINAPI package3_AddRef( IPackage3 *iface )
++{
++    struct package *impl = impl_from_IPackage3( iface );
++    return package_AddRef( &impl->IPackage_iface );
++}
++
++static ULONG WINAPI package3_Release( IPackage3 *iface )
++{
++    struct package *impl = impl_from_IPackage3( iface );
++    return package_Release( &impl->IPackage_iface );
++}
++
++static HRESULT WINAPI package3_GetIids( IPackage3 *iface, ULONG *iid_count, IID **iids )
++{
++    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI package3_GetRuntimeClassName( IPackage3 *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.ApplicationModel.Package", 32, class_name );
++}
++
++static HRESULT WINAPI package3_GetTrustLevel( IPackage3 *iface, TrustLevel *trust_level )
++{
++    if (trust_level) *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI package3_get_Status( IPackage3 *iface, IPackageStatus **value )
++{
++    FIXME( "iface %p, value %p stub!\n", iface, value );
++    if (value) *value = NULL;
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI package3_get_InstalledDate( IPackage3 *iface, DateTime *value )
++{
++    FILETIME ft;
++    TRACE( "iface %p, value %p.\n", iface, value );
++    if (!value) return E_INVALIDARG;
++    GetSystemTimeAsFileTime( &ft );
++    value->UniversalTime = ((INT64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
++    return S_OK;
++}
++
++static HRESULT WINAPI package3_GetAppListEntriesAsync( IPackage3 *iface,
++    __FIAsyncOperation_1___FIVectorView_1_Windows__CApplicationModel__CCore__CAppListEntry **operation )
++{
++    FIXME( "iface %p, operation %p stub!\n", iface, operation );
++    if (operation) *operation = NULL;
++    return E_NOTIMPL;
++}
++
++static const struct IPackage3Vtbl package3_vtbl =
++{
++    package3_QueryInterface,
++    package3_AddRef,
++    package3_Release,
++    package3_GetIids,
++    package3_GetRuntimeClassName,
++    package3_GetTrustLevel,
++    package3_get_Status,
++    package3_get_InstalledDate,
++    package3_GetAppListEntriesAsync,
++};
++
+ DEFINE_IINSPECTABLE( package_statics, IPackageStatics, struct package_statics, IActivationFactory_iface )
+ 
+ HRESULT create_package( IPackage **value )
+@@ -698,6 +784,7 @@ HRESULT create_package( IPackage **value )
+     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+ 
+     impl->IPackage_iface.lpVtbl = &package_vtbl;
++    impl->IPackage3_iface.lpVtbl = &package3_vtbl;
+     impl->ref = 1;
+ 
+     *value = &impl->IPackage_iface;
+diff --git a/dlls/windows.globalization/main.c b/dlls/windows.globalization/main.c
+index 65b0cc0cdae..14634e551f1 100644
+--- a/dlls/windows.globalization/main.c
++++ b/dlls/windows.globalization/main.c
+@@ -2077,6 +2077,250 @@ static struct calendar_identifiers_statics calendar_identifiers_factory = {
+     { cal_s3_vtbl }
+ };
+ 
++/*
++ *
++ * Windows.Globalization.DateTimeFormatting.DateTimeFormatter
++ *
++ */
++
++static const GUID IID_IDateTimeFormatterFactory = {0xec8d8a53, 0x1a2e, 0x412d, {0x88, 0x15, 0x3b, 0x74, 0x5f, 0xb1, 0xa2, 0xa0}};
++
++struct date_time_formatter
++{
++    struct { const void *lpVtbl; } IDateTimeFormatter_iface;
++    LONG ref;
++    WCHAR template[128];
++};
++
++#define impl_from_IDateTimeFormatter(ptr) ((struct date_time_formatter *)((char *)(ptr) - offsetof(struct date_time_formatter, IDateTimeFormatter_iface)))
++
++static HRESULT WINAPI dtf_QI(void *iface, REFIID riid, void **out)
++{
++    struct date_time_formatter *impl = impl_from_IDateTimeFormatter(iface);
++    TRACE("iface %p, riid %s, out %p.\n", iface, debugstr_guid(riid), out);
++
++    if (!out) return E_POINTER;
++    *out = &impl->IDateTimeFormatter_iface;
++    InterlockedIncrement(&impl->ref);
++    return S_OK;
++}
++
++static ULONG WINAPI dtf_AddRef(void *iface)
++{
++    struct date_time_formatter *impl = impl_from_IDateTimeFormatter(iface);
++    return InterlockedIncrement(&impl->ref);
++}
++
++static ULONG WINAPI dtf_Release(void *iface)
++{
++    struct date_time_formatter *impl = impl_from_IDateTimeFormatter(iface);
++    ULONG ref = InterlockedDecrement(&impl->ref);
++    if (!ref) free(impl);
++    return ref;
++}
++
++static HRESULT WINAPI dtf_GetIids(void *iface, ULONG *iid_count, IID **iids)
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI dtf_GetRuntimeClassName(void *iface, HSTRING *class_name)
++{
++    return WindowsCreateString(L"Windows.Globalization.DateTimeFormatting.DateTimeFormatter", 58, class_name);
++}
++
++static HRESULT WINAPI dtf_GetTrustLevel(void *iface, TrustLevel *trust_level)
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI dtf_get_Template(void *iface, HSTRING *val)
++{
++    struct date_time_formatter *impl = impl_from_IDateTimeFormatter(iface);
++    if (!val) return E_POINTER;
++    return WindowsCreateString(impl->template, wcslen(impl->template), val);
++}
++
++static HRESULT WINAPI dtf_Format(void *iface, INT64 datetime, HSTRING *result)
++{
++    struct date_time_formatter *impl = impl_from_IDateTimeFormatter(iface);
++    FILETIME ft;
++    SYSTEMTIME st;
++    WCHAR buf[64];
++
++    TRACE("iface %p, datetime %lld, result %p.\n", iface, datetime, result);
++
++    if (!result) return E_POINTER;
++    *result = NULL;
++
++    ft.dwLowDateTime = (DWORD)(datetime & 0xffffffff);
++    ft.dwHighDateTime = (DWORD)(datetime >> 32);
++
++    if (!FileTimeToSystemTime(&ft, &st))
++        GetSystemTime(&st);
++
++    if (wcsstr(impl->template, L"month") && wcsstr(impl->template, L"day") && wcsstr(impl->template, L"year"))
++        swprintf(buf, ARRAY_SIZE(buf), L"%u/%u/%04u", st.wMonth, st.wDay, st.wYear);
++    else
++        swprintf(buf, ARRAY_SIZE(buf), L"%02u/%02u/%04u", st.wMonth, st.wDay, st.wYear);
++
++    return WindowsCreateString(buf, wcslen(buf), result);
++}
++
++static HRESULT WINAPI dtf_stub(void *iface)
++{
++    return S_OK;
++}
++
++static const void *dtf_vtbl[] = {
++    (void *)dtf_QI,
++    (void *)dtf_AddRef,
++    (void *)dtf_Release,
++    (void *)dtf_GetIids,
++    (void *)dtf_GetRuntimeClassName,
++    (void *)dtf_GetTrustLevel,
++    (void *)dtf_stub,               /* slot 6: get_Languages */
++    (void *)dtf_stub,               /* slot 7: get_GeographicRegion */
++    (void *)dtf_stub,               /* slot 8: get_Calendar */
++    (void *)dtf_stub,               /* slot 9: get_Clock */
++    (void *)dtf_get_Template,       /* slot 10: get_Template */
++    (void *)dtf_Format,             /* slot 11: Format (fallback) */
++    (void *)dtf_Format,             /* slot 12: Format (fallback) */
++    (void *)dtf_stub,               /* slot 13: get_Patterns */
++    (void *)dtf_Format,             /* slot 14: Format (0x70 in Solitaire.exe) */
++    (void *)dtf_Format              /* slot 15: FormatUsingSettings */
++};
++
++struct date_time_formatter_factory_impl
++{
++    IActivationFactory IActivationFactory_iface;
++    struct { const void *lpVtbl; } IDateTimeFormatterFactory_iface;
++    LONG ref;
++};
++
++#define impl_from_dtf_fac(ptr) ((struct date_time_formatter_factory_impl *)((char *)(ptr) - offsetof(struct date_time_formatter_factory_impl, IActivationFactory_iface)))
++#define impl_from_dtf_fact_iface(ptr) ((struct date_time_formatter_factory_impl *)((char *)(ptr) - offsetof(struct date_time_formatter_factory_impl, IDateTimeFormatterFactory_iface)))
++
++static HRESULT dtf_fac_QI_internal(struct date_time_formatter_factory_impl *impl, REFIID riid, void **ppvObject)
++{
++    if (!ppvObject) return E_POINTER;
++    *ppvObject = NULL;
++
++    if (IsEqualGUID(riid, &IID_IUnknown) ||
++        IsEqualGUID(riid, &IID_IInspectable) ||
++        IsEqualGUID(riid, &IID_IAgileObject) ||
++        IsEqualGUID(riid, &IID_IActivationFactory))
++    {
++        *ppvObject = &impl->IActivationFactory_iface;
++        return S_OK;
++    }
++    if (IsEqualGUID(riid, &IID_IDateTimeFormatterFactory))
++    {
++        *ppvObject = &impl->IDateTimeFormatterFactory_iface;
++        return S_OK;
++    }
++
++    /* Fallback: return factory interface */
++    *ppvObject = &impl->IDateTimeFormatterFactory_iface;
++    return S_OK;
++}
++
++static HRESULT WINAPI dtf_activation_factory_QI(IActivationFactory *iface, REFIID riid, void **ppvObject)
++{
++    struct date_time_formatter_factory_impl *impl = impl_from_dtf_fac(iface);
++    HRESULT hr = dtf_fac_QI_internal(impl, riid, ppvObject);
++    if (SUCCEEDED(hr)) IUnknown_AddRef((IUnknown *)*ppvObject);
++    return hr;
++}
++
++static ULONG WINAPI dtf_fac_AddRef(IActivationFactory *iface)
++{
++    struct date_time_formatter_factory_impl *impl = impl_from_dtf_fac(iface);
++    return InterlockedIncrement(&impl->ref);
++}
++
++static ULONG WINAPI dtf_fac_Release(IActivationFactory *iface)
++{
++    struct date_time_formatter_factory_impl *impl = impl_from_dtf_fac(iface);
++    return InterlockedDecrement(&impl->ref);
++}
++
++static ULONG WINAPI dtf_fact_AddRef(void *iface)
++{
++    struct date_time_formatter_factory_impl *impl = impl_from_dtf_fact_iface(iface);
++    return InterlockedIncrement(&impl->ref);
++}
++
++static ULONG WINAPI dtf_fact_Release(void *iface)
++{
++    struct date_time_formatter_factory_impl *impl = impl_from_dtf_fact_iface(iface);
++    return InterlockedDecrement(&impl->ref);
++}
++
++static HRESULT WINAPI dtf_fact_QI(void *iface, REFIID riid, void **ppvObject)
++{
++    struct date_time_formatter_factory_impl *impl = impl_from_dtf_fact_iface(iface);
++    HRESULT hr = dtf_fac_QI_internal(impl, riid, ppvObject);
++    if (SUCCEEDED(hr)) IUnknown_AddRef((IUnknown *)*ppvObject);
++    return hr;
++}
++
++static HRESULT WINAPI dtf_fac_ActivateInstance(IActivationFactory *iface, IInspectable **instance)
++{
++    if (instance) *instance = NULL;
++    return E_NOTIMPL;
++}
++
++static const struct IActivationFactoryVtbl dtf_activation_factory_vtbl = {
++    dtf_activation_factory_QI,
++    dtf_fac_AddRef,
++    dtf_fac_Release,
++    (void *)dtf_GetIids,
++    (void *)dtf_GetRuntimeClassName,
++    (void *)dtf_GetTrustLevel,
++    dtf_fac_ActivateInstance
++};
++
++static HRESULT WINAPI dtf_fact_CreateDateTimeFormatter(void *This, HSTRING formatTemplate, void **result)
++{
++    const WCHAR *tmpl = WindowsGetStringRawBuffer(formatTemplate, NULL);
++    struct date_time_formatter *impl;
++
++    TRACE("This %p, formatTemplate %s, result %p.\n", This, debugstr_w(tmpl), result);
++
++    if (!result) return E_POINTER;
++    *result = NULL;
++
++    if (!(impl = calloc(1, sizeof(*impl)))) return E_OUTOFMEMORY;
++    impl->IDateTimeFormatter_iface.lpVtbl = dtf_vtbl;
++    impl->ref = 1;
++    if (tmpl) lstrcpynW(impl->template, tmpl, ARRAY_SIZE(impl->template));
++
++    *result = &impl->IDateTimeFormatter_iface;
++    return S_OK;
++}
++
++static const void *dtf_factory_vtbl[] = {
++    (void *)dtf_fact_QI,
++    (void *)dtf_fact_AddRef,
++    (void *)dtf_fact_Release,
++    (void *)dtf_GetIids,
++    (void *)dtf_GetRuntimeClassName,
++    (void *)dtf_GetTrustLevel,
++    (void *)dtf_fact_CreateDateTimeFormatter,
++    (void *)dtf_stub,
++    (void *)dtf_stub
++};
++
++static struct date_time_formatter_factory_impl date_time_formatter_factory = {
++    { &dtf_activation_factory_vtbl },
++    { dtf_factory_vtbl },
++    1
++};
++
+ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
+ {
+     FIXME("clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out);
+@@ -2126,6 +2370,11 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
+         *factory = &calendar_identifiers_factory.IActivationFactory_iface;
+         IUnknown_AddRef(*factory);
+     }
++    else if (!wcscmp(name, L"Windows.Globalization.DateTimeFormatting.DateTimeFormatter"))
++    {
++        *factory = &date_time_formatter_factory.IActivationFactory_iface;
++        IUnknown_AddRef(*factory);
++    }
+ 
+     if (*factory) return S_OK;
+     return CLASS_E_CLASSNOTAVAILABLE;
+diff --git a/dlls/windows.storage.applicationdata/applicationdata.c b/dlls/windows.storage.applicationdata/applicationdata.c
+index 42529587554..68a136f542e 100644
+--- a/dlls/windows.storage.applicationdata/applicationdata.c
++++ b/dlls/windows.storage.applicationdata/applicationdata.c
+@@ -1335,6 +1335,507 @@ static HRESULT async_storage_file_create( IStorageFile *file, HRESULT hr, AsyncS
+     return S_OK;
+ }
+ 
++static const struct IStorageFolderVtbl storage_folder_vtbl;
++static const struct IStorageItemVtbl storage_item_vtbl;
++
++struct async_storage_folder
++{
++    IAsyncOperation_StorageFolder IAsyncOperation_StorageFolder_iface;
++    IAsyncInfo IAsyncInfo_iface;
++    LONG ref;
++    IStorageFolder *result;
++    IAsyncOperationCompletedHandler_StorageFolder *handler;
++    HRESULT hr;
++    AsyncStatus status;
++};
++
++static inline struct async_storage_folder *impl_from_IAsyncOperation_StorageFolder( IAsyncOperation_StorageFolder *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_storage_folder, IAsyncOperation_StorageFolder_iface );
++}
++
++static inline struct async_storage_folder *impl_from_async_storage_folder_IAsyncInfo( IAsyncInfo *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_storage_folder, IAsyncInfo_iface );
++}
++
++static HRESULT WINAPI async_storage_folder_QueryInterface( IAsyncOperation_StorageFolder *iface, REFIID iid, void **out )
++{
++    struct async_storage_folder *impl = impl_from_IAsyncOperation_StorageFolder( iface );
++
++    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
++    if (!out) return E_POINTER;
++    *out = NULL;
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IAsyncOperation_StorageFolder ))
++    {
++        *out = &impl->IAsyncOperation_StorageFolder_iface;
++        IAsyncOperation_StorageFolder_AddRef( iface );
++        return S_OK;
++    }
++
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        *out = &impl->IAsyncInfo_iface;
++        IAsyncOperation_StorageFolder_AddRef( iface );
++        return S_OK;
++    }
++
++    TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI async_storage_folder_AddRef( IAsyncOperation_StorageFolder *iface )
++{
++    struct async_storage_folder *impl = impl_from_IAsyncOperation_StorageFolder( iface );
++    ULONG ref = InterlockedIncrement( &impl->ref );
++    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
++    return ref;
++}
++
++static ULONG WINAPI async_storage_folder_Release( IAsyncOperation_StorageFolder *iface )
++{
++    struct async_storage_folder *impl = impl_from_IAsyncOperation_StorageFolder( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
++    if (!ref)
++    {
++        if (impl->result) IStorageFolder_Release( impl->result );
++        if (impl->handler) IAsyncOperationCompletedHandler_StorageFolder_Release( impl->handler );
++        free( impl );
++    }
++    return ref;
++}
++
++static HRESULT WINAPI async_storage_folder_GetIids( IAsyncOperation_StorageFolder *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    if (iids) *iids = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_GetRuntimeClassName( IAsyncOperation_StorageFolder *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.StorageFolder>",
++                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.StorageFolder>") - 1,
++                                class_name );
++}
++
++static HRESULT WINAPI async_storage_folder_GetTrustLevel( IAsyncOperation_StorageFolder *iface, TrustLevel *trust_level )
++{
++    if (trust_level) *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_put_Completed( IAsyncOperation_StorageFolder *iface,
++    IAsyncOperationCompletedHandler_StorageFolder *handler )
++{
++    struct async_storage_folder *impl = impl_from_IAsyncOperation_StorageFolder( iface );
++    TRACE( "iface %p, handler %p.\n", iface, handler );
++    if (impl->handler) IAsyncOperationCompletedHandler_StorageFolder_Release( impl->handler );
++    if ((impl->handler = handler))
++    {
++        IAsyncOperationCompletedHandler_StorageFolder_AddRef( handler );
++        IAsyncOperationCompletedHandler_StorageFolder_Invoke( handler, iface, impl->status );
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_get_Completed( IAsyncOperation_StorageFolder *iface,
++    IAsyncOperationCompletedHandler_StorageFolder **handler )
++{
++    struct async_storage_folder *impl = impl_from_IAsyncOperation_StorageFolder( iface );
++    if (!handler) return E_INVALIDARG;
++    *handler = impl->handler;
++    if (*handler) IAsyncOperationCompletedHandler_StorageFolder_AddRef( *handler );
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_GetResults( IAsyncOperation_StorageFolder *iface,
++    IStorageFolder **results )
++{
++    struct async_storage_folder *impl = impl_from_IAsyncOperation_StorageFolder( iface );
++    TRACE( "iface %p, results %p, hr %#lx, status %d.\n", iface, results, impl->hr, impl->status );
++    if (FAILED(impl->hr))
++    {
++        if (results) *results = NULL;
++        return impl->hr;
++    }
++    if (!results) return E_INVALIDARG;
++    *results = impl->result;
++    if (*results) IStorageFolder_AddRef( *results );
++    return S_OK;
++}
++
++static const struct IAsyncOperation_StorageFolderVtbl async_storage_folder_vtbl =
++{
++    async_storage_folder_QueryInterface,
++    async_storage_folder_AddRef,
++    async_storage_folder_Release,
++    async_storage_folder_GetIids,
++    async_storage_folder_GetRuntimeClassName,
++    async_storage_folder_GetTrustLevel,
++    async_storage_folder_put_Completed,
++    async_storage_folder_get_Completed,
++    async_storage_folder_GetResults,
++};
++
++static HRESULT WINAPI async_storage_folder_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
++{
++    struct async_storage_folder *impl = impl_from_async_storage_folder_IAsyncInfo( iface );
++    return async_storage_folder_QueryInterface( &impl->IAsyncOperation_StorageFolder_iface, iid, out );
++}
++
++static ULONG WINAPI async_storage_folder_info_AddRef( IAsyncInfo *iface )
++{
++    struct async_storage_folder *impl = impl_from_async_storage_folder_IAsyncInfo( iface );
++    return async_storage_folder_AddRef( &impl->IAsyncOperation_StorageFolder_iface );
++}
++
++static ULONG WINAPI async_storage_folder_info_Release( IAsyncInfo *iface )
++{
++    struct async_storage_folder *impl = impl_from_async_storage_folder_IAsyncInfo( iface );
++    return async_storage_folder_Release( &impl->IAsyncOperation_StorageFolder_iface );
++}
++
++static HRESULT WINAPI async_storage_folder_info_GetIids( IAsyncInfo *iface, ULONG *iid_count, IID **iids )
++{
++    return async_storage_folder_GetIids( NULL, iid_count, iids );
++}
++
++static HRESULT WINAPI async_storage_folder_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncInfo", ARRAY_SIZE(L"Windows.Foundation.IAsyncInfo") - 1, class_name );
++}
++
++static HRESULT WINAPI async_storage_folder_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *trust_level )
++{
++    if (trust_level) *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_info_get_Id( IAsyncInfo *iface, UINT32 *id )
++{
++    if (!id) return E_INVALIDARG;
++    *id = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
++{
++    struct async_storage_folder *impl = impl_from_async_storage_folder_IAsyncInfo( iface );
++    if (!status) return E_INVALIDARG;
++    *status = impl->status;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error_code )
++{
++    struct async_storage_folder *impl = impl_from_async_storage_folder_IAsyncInfo( iface );
++    if (!error_code) return E_INVALIDARG;
++    *error_code = impl->hr;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_info_Cancel( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_folder_info_Close( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static const struct IAsyncInfoVtbl async_storage_folder_info_vtbl =
++{
++    async_storage_folder_info_QueryInterface,
++    async_storage_folder_info_AddRef,
++    async_storage_folder_info_Release,
++    async_storage_folder_info_GetIids,
++    async_storage_folder_info_GetRuntimeClassName,
++    async_storage_folder_info_GetTrustLevel,
++    async_storage_folder_info_get_Id,
++    async_storage_folder_info_get_Status,
++    async_storage_folder_info_get_ErrorCode,
++    async_storage_folder_info_Cancel,
++    async_storage_folder_info_Close,
++};
++
++static HRESULT async_storage_folder_create( IStorageFolder *folder, HRESULT hr, AsyncStatus status, IAsyncOperation_StorageFolder **out )
++{
++    struct async_storage_folder *impl;
++
++    if (!out) return E_INVALIDARG;
++    *out = NULL;
++
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++
++    impl->IAsyncOperation_StorageFolder_iface.lpVtbl = &async_storage_folder_vtbl;
++    impl->IAsyncInfo_iface.lpVtbl = &async_storage_folder_info_vtbl;
++    impl->ref = 1;
++    impl->result = folder;
++    if (folder) IStorageFolder_AddRef( folder );
++    impl->hr = hr;
++    impl->status = status;
++
++    *out = &impl->IAsyncOperation_StorageFolder_iface;
++    TRACE( "created async_storage_folder %p: folder %p, hr %#lx, status %d\n", *out, folder, hr, status );
++    return S_OK;
++}
++
++struct async_storage_item
++{
++    IAsyncOperation_IStorageItem IAsyncOperation_IStorageItem_iface;
++    IAsyncInfo IAsyncInfo_iface;
++    LONG ref;
++    IStorageItem *result;
++    IAsyncOperationCompletedHandler_IStorageItem *handler;
++    HRESULT hr;
++    AsyncStatus status;
++};
++
++static inline struct async_storage_item *impl_from_IAsyncOperation_IStorageItem( IAsyncOperation_IStorageItem *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_storage_item, IAsyncOperation_IStorageItem_iface );
++}
++
++static inline struct async_storage_item *impl_from_async_storage_item_IAsyncInfo( IAsyncInfo *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_storage_item, IAsyncInfo_iface );
++}
++
++static HRESULT WINAPI async_storage_item_QueryInterface( IAsyncOperation_IStorageItem *iface, REFIID iid, void **out )
++{
++    struct async_storage_item *impl = impl_from_IAsyncOperation_IStorageItem( iface );
++
++    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
++    if (!out) return E_POINTER;
++    *out = NULL;
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IAsyncOperation_IStorageItem ))
++    {
++        *out = &impl->IAsyncOperation_IStorageItem_iface;
++        IAsyncOperation_IStorageItem_AddRef( iface );
++        return S_OK;
++    }
++
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        *out = &impl->IAsyncInfo_iface;
++        IAsyncOperation_IStorageItem_AddRef( iface );
++        return S_OK;
++    }
++
++    TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI async_storage_item_AddRef( IAsyncOperation_IStorageItem *iface )
++{
++    struct async_storage_item *impl = impl_from_IAsyncOperation_IStorageItem( iface );
++    ULONG ref = InterlockedIncrement( &impl->ref );
++    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
++    return ref;
++}
++
++static ULONG WINAPI async_storage_item_Release( IAsyncOperation_IStorageItem *iface )
++{
++    struct async_storage_item *impl = impl_from_IAsyncOperation_IStorageItem( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
++    if (!ref)
++    {
++        if (impl->result) IStorageItem_Release( impl->result );
++        if (impl->handler) IAsyncOperationCompletedHandler_IStorageItem_Release( impl->handler );
++        free( impl );
++    }
++    return ref;
++}
++
++static HRESULT WINAPI async_storage_item_GetIids( IAsyncOperation_IStorageItem *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    if (iids) *iids = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_GetRuntimeClassName( IAsyncOperation_IStorageItem *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.IStorageItem>",
++                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.IStorageItem>") - 1,
++                                class_name );
++}
++
++static HRESULT WINAPI async_storage_item_GetTrustLevel( IAsyncOperation_IStorageItem *iface, TrustLevel *trust_level )
++{
++    if (trust_level) *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_put_Completed( IAsyncOperation_IStorageItem *iface,
++    IAsyncOperationCompletedHandler_IStorageItem *handler )
++{
++    struct async_storage_item *impl = impl_from_IAsyncOperation_IStorageItem( iface );
++    TRACE( "iface %p, handler %p.\n", iface, handler );
++    if (impl->handler) IAsyncOperationCompletedHandler_IStorageItem_Release( impl->handler );
++    if ((impl->handler = handler))
++    {
++        IAsyncOperationCompletedHandler_IStorageItem_AddRef( handler );
++        IAsyncOperationCompletedHandler_IStorageItem_Invoke( handler, iface, impl->status );
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_get_Completed( IAsyncOperation_IStorageItem *iface,
++    IAsyncOperationCompletedHandler_IStorageItem **handler )
++{
++    struct async_storage_item *impl = impl_from_IAsyncOperation_IStorageItem( iface );
++    if (!handler) return E_INVALIDARG;
++    *handler = impl->handler;
++    if (*handler) IAsyncOperationCompletedHandler_IStorageItem_AddRef( *handler );
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_GetResults( IAsyncOperation_IStorageItem *iface,
++    IStorageItem **results )
++{
++    struct async_storage_item *impl = impl_from_IAsyncOperation_IStorageItem( iface );
++    TRACE( "iface %p, results %p, hr %#lx, status %d.\n", iface, results, impl->hr, impl->status );
++    if (FAILED(impl->hr))
++    {
++        if (results) *results = NULL;
++        return impl->hr;
++    }
++    if (!results) return E_INVALIDARG;
++    *results = impl->result;
++    if (*results) IStorageItem_AddRef( *results );
++    return S_OK;
++}
++
++static const struct IAsyncOperation_IStorageItemVtbl async_storage_item_vtbl =
++{
++    async_storage_item_QueryInterface,
++    async_storage_item_AddRef,
++    async_storage_item_Release,
++    async_storage_item_GetIids,
++    async_storage_item_GetRuntimeClassName,
++    async_storage_item_GetTrustLevel,
++    async_storage_item_put_Completed,
++    async_storage_item_get_Completed,
++    async_storage_item_GetResults,
++};
++
++static HRESULT WINAPI async_storage_item_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
++{
++    struct async_storage_item *impl = impl_from_async_storage_item_IAsyncInfo( iface );
++    return async_storage_item_QueryInterface( &impl->IAsyncOperation_IStorageItem_iface, iid, out );
++}
++
++static ULONG WINAPI async_storage_item_info_AddRef( IAsyncInfo *iface )
++{
++    struct async_storage_item *impl = impl_from_async_storage_item_IAsyncInfo( iface );
++    return async_storage_item_AddRef( &impl->IAsyncOperation_IStorageItem_iface );
++}
++
++static ULONG WINAPI async_storage_item_info_Release( IAsyncInfo *iface )
++{
++    struct async_storage_item *impl = impl_from_async_storage_item_IAsyncInfo( iface );
++    return async_storage_item_Release( &impl->IAsyncOperation_IStorageItem_iface );
++}
++
++static HRESULT WINAPI async_storage_item_info_GetIids( IAsyncInfo *iface, ULONG *iid_count, IID **iids )
++{
++    return async_storage_item_GetIids( NULL, iid_count, iids );
++}
++
++static HRESULT WINAPI async_storage_item_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncInfo", ARRAY_SIZE(L"Windows.Foundation.IAsyncInfo") - 1, class_name );
++}
++
++static HRESULT WINAPI async_storage_item_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *trust_level )
++{
++    if (trust_level) *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_info_get_Id( IAsyncInfo *iface, UINT32 *id )
++{
++    if (!id) return E_INVALIDARG;
++    *id = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
++{
++    struct async_storage_item *impl = impl_from_async_storage_item_IAsyncInfo( iface );
++    if (!status) return E_INVALIDARG;
++    *status = impl->status;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error_code )
++{
++    struct async_storage_item *impl = impl_from_async_storage_item_IAsyncInfo( iface );
++    if (!error_code) return E_INVALIDARG;
++    *error_code = impl->hr;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_info_Cancel( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI async_storage_item_info_Close( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static const struct IAsyncInfoVtbl async_storage_item_info_vtbl =
++{
++    async_storage_item_info_QueryInterface,
++    async_storage_item_info_AddRef,
++    async_storage_item_info_Release,
++    async_storage_item_info_GetIids,
++    async_storage_item_info_GetRuntimeClassName,
++    async_storage_item_info_GetTrustLevel,
++    async_storage_item_info_get_Id,
++    async_storage_item_info_get_Status,
++    async_storage_item_info_get_ErrorCode,
++    async_storage_item_info_Cancel,
++    async_storage_item_info_Close,
++};
++
++static HRESULT async_storage_item_create( IStorageItem *item, HRESULT hr, AsyncStatus status, IAsyncOperation_IStorageItem **out )
++{
++    struct async_storage_item *impl;
++
++    if (!out) return E_INVALIDARG;
++    *out = NULL;
++
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++
++    impl->IAsyncOperation_IStorageItem_iface.lpVtbl = &async_storage_item_vtbl;
++    impl->IAsyncInfo_iface.lpVtbl = &async_storage_item_info_vtbl;
++    impl->ref = 1;
++    impl->result = item;
++    if (item) IStorageItem_AddRef( item );
++    impl->hr = hr;
++    impl->status = status;
++
++    *out = &impl->IAsyncOperation_IStorageItem_iface;
++    TRACE( "created async_storage_item %p: item %p, hr %#lx, status %d\n", *out, item, hr, status );
++    return S_OK;
++}
++
+ struct storage_folder
+ {
+     IStorageFolder IStorageFolder_iface;
+@@ -1475,19 +1976,99 @@ static HRESULT WINAPI storage_folder_CreateFileAsyncOverloadDefaultOptions(
+     return storage_folder_CreateFileAsync( iface, name, CreationCollisionOption_FailIfExists, operation );
+ }
+ 
+-static HRESULT WINAPI storage_folder_CreateFolderAsyncOverloadDefaultOptions(
+-        IStorageFolder *iface, HSTRING name, IAsyncOperation_StorageFolder **operation )
++static void create_directory_chain( const WCHAR *path )
+ {
+-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring( name ), operation );
+-    return E_NOTIMPL;
++    WCHAR *backslash;
++    WCHAR buffer[MAX_PATH];
++
++    lstrcpynW( buffer, path, MAX_PATH );
++    if (CreateDirectoryW( buffer, NULL ) || GetLastError() == ERROR_ALREADY_EXISTS) return;
++    /* Create the chain one level at a time; exists-always wins. */
++    for (backslash = wcschr( buffer + 3, '\\' ); backslash; backslash = wcschr( backslash + 1, '\\' ))
++    {
++        *backslash = 0;
++        CreateDirectoryW( buffer, NULL );
++        *backslash = '\\';
++    }
++    CreateDirectoryW( buffer, NULL );
++}
++
++static HRESULT storage_folder_create_from_path( const WCHAR *path, const WCHAR *name, IStorageFolder **value )
++{
++    struct storage_folder *impl;
++
++    if (!value) return E_INVALIDARG;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++
++    lstrcpynW( impl->path, path, MAX_PATH );
++    create_directory_chain( impl->path );
++
++    if (name && *name)
++    {
++        lstrcpynW( impl->name, name, ARRAY_SIZE( impl->name ) );
++    }
++    else
++    {
++        const WCHAR *p = wcsrchr( path, '\\' );
++        lstrcpynW( impl->name, p ? p + 1 : path, ARRAY_SIZE( impl->name ) );
++    }
++
++    impl->IStorageFolder_iface.lpVtbl = &storage_folder_vtbl;
++    impl->IStorageItem_iface.lpVtbl = &storage_item_vtbl;
++    impl->ref = 1;
++
++    TRACE( "created IStorageFolder %p for %s at %s.\n", &impl->IStorageFolder_iface,
++           debugstr_w( impl->name ), debugstr_w( impl->path ) );
++    *value = &impl->IStorageFolder_iface;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI storage_folder_CreateFolderAsync(
+         IStorageFolder *iface, HSTRING name, CreationCollisionOption options,
+         IAsyncOperation_StorageFolder **operation )
+ {
+-    FIXME( "iface %p, name %s, options %d, operation %p stub!\n", iface, debugstr_hstring( name ), options, operation );
+-    return E_NOTIMPL;
++    struct storage_folder *impl = impl_from_IStorageFolder( iface );
++    const WCHAR *folder_name = WindowsGetStringRawBuffer( name, NULL );
++    WCHAR full_path[MAX_PATH];
++    IStorageFolder *subfolder = NULL;
++    DWORD attr;
++    HRESULT hr;
++
++    TRACE( "iface %p, name %s, options %d, operation %p.\n", iface, debugstr_hstring( name ), options, operation );
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    if (!folder_name || !*folder_name) return E_INVALIDARG;
++
++    lstrcpynW( full_path, impl->path, ARRAY_SIZE(full_path) );
++    append_path_component( full_path, folder_name, ARRAY_SIZE(full_path) );
++
++    attr = GetFileAttributesW( full_path );
++    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
++    {
++        if (options == CreationCollisionOption_FailIfExists)
++        {
++            TRACE( "folder %s already exists, returning ERROR_ALREADY_EXISTS\n", debugstr_w(full_path) );
++            return async_storage_folder_create( NULL, HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS), Error, operation );
++        }
++    }
++    else
++    {
++        create_directory_chain( full_path );
++    }
++
++    hr = storage_folder_create_from_path( full_path, folder_name, &subfolder );
++    if (FAILED(hr)) return hr;
++
++    hr = async_storage_folder_create( subfolder, S_OK, Completed, operation );
++    IStorageFolder_Release( subfolder );
++    return hr;
++}
++
++static HRESULT WINAPI storage_folder_CreateFolderAsyncOverloadDefaultOptions(
++        IStorageFolder *iface, HSTRING name, IAsyncOperation_StorageFolder **operation )
++{
++    return storage_folder_CreateFolderAsync( iface, name, CreationCollisionOption_FailIfExists, operation );
+ }
+ 
+ static HRESULT WINAPI storage_folder_GetFileAsync( IStorageFolder *iface, HSTRING name,
+@@ -1525,15 +2106,85 @@ static HRESULT WINAPI storage_folder_GetFileAsync( IStorageFolder *iface, HSTRIN
+ static HRESULT WINAPI storage_folder_GetFolderAsync( IStorageFolder *iface, HSTRING name,
+         IAsyncOperation_StorageFolder **operation )
+ {
+-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring( name ), operation );
+-    return async_storage_file_create( NULL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), Error, (IAsyncOperation_StorageFile **)operation );
++    struct storage_folder *impl = impl_from_IStorageFolder( iface );
++    const WCHAR *folder_name = WindowsGetStringRawBuffer( name, NULL );
++    WCHAR full_path[MAX_PATH];
++    DWORD attr;
++    IStorageFolder *subfolder = NULL;
++    HRESULT hr;
++
++    TRACE( "iface %p, name %s, operation %p.\n", iface, debugstr_hstring( name ), operation );
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    if (!folder_name || !*folder_name) return E_INVALIDARG;
++
++    lstrcpynW( full_path, impl->path, ARRAY_SIZE(full_path) );
++    append_path_component( full_path, folder_name, ARRAY_SIZE(full_path) );
++
++    attr = GetFileAttributesW( full_path );
++    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
++    {
++        hr = storage_folder_create_from_path( full_path, folder_name, &subfolder );
++        if (FAILED(hr)) return hr;
++        hr = async_storage_folder_create( subfolder, S_OK, Completed, operation );
++        IStorageFolder_Release( subfolder );
++        return hr;
++    }
++
++    TRACE( "folder %s not found at %s, returning async error 0x80070002.\n", debugstr_w(folder_name), debugstr_w(full_path) );
++    return async_storage_folder_create( NULL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), Error, operation );
+ }
+ 
+ static HRESULT WINAPI storage_folder_GetItemAsync( IStorageFolder *iface, HSTRING name,
+         IAsyncOperation_IStorageItem **operation )
+ {
+-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring( name ), operation );
+-    return async_storage_file_create( NULL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), Error, (IAsyncOperation_StorageFile **)operation );
++    struct storage_folder *impl = impl_from_IStorageFolder( iface );
++    const WCHAR *item_name = WindowsGetStringRawBuffer( name, NULL );
++    WCHAR full_path[MAX_PATH];
++    DWORD attr;
++
++    TRACE( "iface %p, name %s, operation %p.\n", iface, debugstr_hstring( name ), operation );
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    if (!item_name || !*item_name) return E_INVALIDARG;
++
++    lstrcpynW( full_path, impl->path, ARRAY_SIZE(full_path) );
++    append_path_component( full_path, item_name, ARRAY_SIZE(full_path) );
++
++    attr = GetFileAttributesW( full_path );
++    if (attr != INVALID_FILE_ATTRIBUTES)
++    {
++        if (attr & FILE_ATTRIBUTE_DIRECTORY)
++        {
++            IStorageFolder *folder = NULL;
++            IStorageItem *item = NULL;
++            HRESULT hr = storage_folder_create_from_path( full_path, item_name, &folder );
++            if (FAILED(hr)) return hr;
++            hr = IStorageFolder_QueryInterface( folder, &IID_IStorageItem, (void **)&item );
++            IStorageFolder_Release( folder );
++            if (FAILED(hr)) return hr;
++            hr = async_storage_item_create( item, S_OK, Completed, operation );
++            IStorageItem_Release( item );
++            return hr;
++        }
++        else
++        {
++            IStorageFile *file = NULL;
++            IStorageItem *item = NULL;
++            HRESULT hr = storage_file_create( full_path, &file );
++            if (FAILED(hr)) return hr;
++            hr = IStorageFile_QueryInterface( file, &IID_IStorageItem, (void **)&item );
++            IStorageFile_Release( file );
++            if (FAILED(hr)) return hr;
++            hr = async_storage_item_create( item, S_OK, Completed, operation );
++            IStorageItem_Release( item );
++            return hr;
++        }
++    }
++
++    return async_storage_item_create( NULL, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), Error, operation );
+ }
+ 
+ struct empty_vector_view
+@@ -2248,60 +2899,35 @@ static const struct IStorageItemVtbl storage_item_vtbl =
+     storage_item_IsOfType,
+ };
+ 
+-static void create_directory_chain( const WCHAR *path )
+-{
+-    WCHAR *backslash;
+-
+-    if (CreateDirectoryW( path, NULL ) || GetLastError() == ERROR_ALREADY_EXISTS) return;
+-    /* Create the chain one level at a time; exists-always wins. */
+-    for (backslash = wcschr( path + 3, '\\' ); backslash; backslash = wcschr( backslash + 1, '\\' ))
+-    {
+-        *backslash = 0;
+-        CreateDirectoryW( path, NULL );
+-        *backslash = '\\';
+-    }
+-    CreateDirectoryW( path, NULL );
+-}
+-
+ static HRESULT storage_folder_create( const WCHAR *kind_name, IStorageFolder **value )
+ {
+-    struct storage_folder *impl;
++    WCHAR path[MAX_PATH] = {0};
+     WCHAR family[128];
+     UINT32 family_len = ARRAY_SIZE( family );
+     LONG family_ret;
+ 
+     if (!value) return E_INVALIDARG;
+-    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+ 
+     family_ret = GetCurrentPackageFamilyName( &family_len, family );
+-    if (GetEnvironmentVariableW( L"LOCALAPPDATA", impl->path, MAX_PATH ) && *impl->path)
++    if (GetEnvironmentVariableW( L"LOCALAPPDATA", path, MAX_PATH ) && *path)
+     {
+         if (family_ret == ERROR_SUCCESS)
+         {
+-            append_path_component( impl->path, L"Packages", MAX_PATH );
+-            append_path_component( impl->path, family, MAX_PATH );
++            append_path_component( path, L"Packages", MAX_PATH );
++            append_path_component( path, family, MAX_PATH );
+         }
+         else
+         {
+             WARN( "no package identity (hr %#x); using bare %s directory.\n", (UINT32)family_ret, debugstr_w( kind_name ) );
+         }
+-        append_path_component( impl->path, kind_name, MAX_PATH );
+-        create_directory_chain( impl->path );
++        append_path_component( path, kind_name, MAX_PATH );
+     }
+     else
+     {
+         ERR( "LOCALAPPDATA not set; %s has no path (folder object stays name-only).\n", debugstr_w( kind_name ) );
+     }
+ 
+-    lstrcpynW( impl->name, kind_name, ARRAY_SIZE( impl->name ) );
+-    impl->IStorageFolder_iface.lpVtbl = &storage_folder_vtbl;
+-    impl->IStorageItem_iface.lpVtbl = &storage_item_vtbl;
+-    impl->ref = 1;
+-
+-    TRACE( "created IStorageFolder %p for %s at %s.\n", &impl->IStorageFolder_iface,
+-           debugstr_w( kind_name ), debugstr_w( impl->path ) );
+-    *value = &impl->IStorageFolder_iface;
+-    return S_OK;
++    return storage_folder_create_from_path( path, kind_name, value );
+ }
+ 
+ static HRESULT WINAPI application_data_folder_get( IApplicationData *iface, const WCHAR *kind_name,
+diff --git a/dlls/windows.storage/file.c b/dlls/windows.storage/file.c
+index ee063e8142e..c82a7f7adf6 100644
+--- a/dlls/windows.storage/file.c
++++ b/dlls/windows.storage/file.c
+@@ -1369,3 +1369,1044 @@ static struct storage_file_statics storage_file_statics =
+ };
+ 
+ IActivationFactory *storage_file_factory = &storage_file_statics.IActivationFactory_iface;
++
++/*
++ * Windows.Storage.FileIO Implementation
++ */
++
++/* IFileIOStatics: GUID {887411eb-7f54-4732-a5f0-5e43e3b8c2f5} */
++static const GUID IID_IFileIOStatics = {0x887411eb, 0x7f54, 0x4732, {0xa5, 0xf0, 0x5e, 0x43, 0xe3, 0xb8, 0xc2, 0xf5}};
++
++typedef struct IFileIOStatics IFileIOStatics;
++
++typedef struct IFileIOStaticsVtbl
++{
++    /* IUnknown */
++    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IFileIOStatics *This, REFIID riid, void **ppvObject);
++    ULONG (STDMETHODCALLTYPE *AddRef)(IFileIOStatics *This);
++    ULONG (STDMETHODCALLTYPE *Release)(IFileIOStatics *This);
++    /* IInspectable */
++    HRESULT (STDMETHODCALLTYPE *GetIids)(IFileIOStatics *This, ULONG *iidCount, IID **iids);
++    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(IFileIOStatics *This, HSTRING *className);
++    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(IFileIOStatics *This, TrustLevel *trustLevel);
++    /* IFileIOStatics */
++    HRESULT (STDMETHODCALLTYPE *ReadTextAsync)(IFileIOStatics *This, IStorageFile *file, IAsyncOperation_HSTRING **operation);
++    HRESULT (STDMETHODCALLTYPE *ReadTextWithEncodingAsync)(IFileIOStatics *This, IStorageFile *file, UINT32 encoding, IAsyncOperation_HSTRING **operation);
++    HRESULT (STDMETHODCALLTYPE *WriteTextAsync)(IFileIOStatics *This, IStorageFile *file, HSTRING contents, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *WriteTextWithEncodingAsync)(IFileIOStatics *This, IStorageFile *file, HSTRING contents, UINT32 encoding, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *AppendTextAsync)(IFileIOStatics *This, IStorageFile *file, HSTRING contents, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *AppendTextWithEncodingAsync)(IFileIOStatics *This, IStorageFile *file, HSTRING contents, UINT32 encoding, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *ReadLinesAsync)(IFileIOStatics *This, IStorageFile *file, void **operation);
++    HRESULT (STDMETHODCALLTYPE *ReadLinesWithEncodingAsync)(IFileIOStatics *This, IStorageFile *file, UINT32 encoding, void **operation);
++    HRESULT (STDMETHODCALLTYPE *WriteLinesAsync)(IFileIOStatics *This, IStorageFile *file, void *lines, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *WriteLinesWithEncodingAsync)(IFileIOStatics *This, IStorageFile *file, void *lines, UINT32 encoding, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *AppendLinesAsync)(IFileIOStatics *This, IStorageFile *file, void *lines, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *AppendLinesWithEncodingAsync)(IFileIOStatics *This, IStorageFile *file, void *lines, UINT32 encoding, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *ReadBufferAsync)(IFileIOStatics *This, IStorageFile *file, void **operation);
++    HRESULT (STDMETHODCALLTYPE *WriteBufferAsync)(IFileIOStatics *This, IStorageFile *file, void *buffer, IAsyncAction **operation);
++    HRESULT (STDMETHODCALLTYPE *WriteBytesAsync)(IFileIOStatics *This, IStorageFile *file, UINT32 count, BYTE *buffer, IAsyncAction **operation);
++} IFileIOStaticsVtbl;
++
++struct IFileIOStatics
++{
++    const IFileIOStaticsVtbl *lpVtbl;
++};
++
++/*
++ * AsyncAction for FileIO
++ */
++struct async_file_action
++{
++    IAsyncAction IAsyncAction_iface;
++    IAsyncInfo IAsyncInfo_iface;
++    LONG ref;
++    HRESULT hr;
++    AsyncStatus status;
++    IAsyncActionCompletedHandler *handler;
++};
++
++static inline struct async_file_action *impl_from_async_file_action( IAsyncAction *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_file_action, IAsyncAction_iface );
++}
++
++static inline struct async_file_action *impl_from_async_file_action_info( IAsyncInfo *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_file_action, IAsyncInfo_iface );
++}
++
++static HRESULT WINAPI async_file_action_QueryInterface( IAsyncAction *iface, REFIID iid, void **out )
++{
++    struct async_file_action *impl = impl_from_async_file_action( iface );
++    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
++
++    if (!out) return E_POINTER;
++    *out = NULL;
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IAsyncAction ))
++    {
++        *out = &impl->IAsyncAction_iface;
++        IAsyncAction_AddRef( iface );
++        return S_OK;
++    }
++
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        *out = &impl->IAsyncInfo_iface;
++        IAsyncAction_AddRef( iface );
++        return S_OK;
++    }
++
++    WARN( "unsupported iid %s\n", debugstr_guid( iid ) );
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI async_file_action_AddRef( IAsyncAction *iface )
++{
++    struct async_file_action *impl = impl_from_async_file_action( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI async_file_action_Release( IAsyncAction *iface )
++{
++    struct async_file_action *impl = impl_from_async_file_action( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->handler) IAsyncActionCompletedHandler_Release( impl->handler );
++        free( impl );
++    }
++    return ref;
++}
++
++static HRESULT WINAPI async_file_action_GetIids( IAsyncAction *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncAction", 31, class_name );
++}
++
++static HRESULT WINAPI async_file_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *trust_level )
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
++{
++    struct async_file_action *impl = impl_from_async_file_action( iface );
++    TRACE( "iface %p, handler %p.\n", iface, handler );
++
++    if (impl->handler) IAsyncActionCompletedHandler_Release( impl->handler );
++    if ((impl->handler = handler)) IAsyncActionCompletedHandler_AddRef( handler );
++
++    if (handler)
++        IAsyncActionCompletedHandler_Invoke( handler, &impl->IAsyncAction_iface, impl->status );
++
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
++{
++    struct async_file_action *impl = impl_from_async_file_action( iface );
++    if (!handler) return E_POINTER;
++    *handler = impl->handler;
++    if (*handler) IAsyncActionCompletedHandler_AddRef( *handler );
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_GetResults( IAsyncAction *iface )
++{
++    struct async_file_action *impl = impl_from_async_file_action( iface );
++    return impl->hr;
++}
++
++static const struct IAsyncActionVtbl async_file_action_vtbl =
++{
++    async_file_action_QueryInterface,
++    async_file_action_AddRef,
++    async_file_action_Release,
++    async_file_action_GetIids,
++    async_file_action_GetRuntimeClassName,
++    async_file_action_GetTrustLevel,
++    async_file_action_put_Completed,
++    async_file_action_get_Completed,
++    async_file_action_GetResults,
++};
++
++static HRESULT WINAPI async_file_action_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
++{
++    struct async_file_action *impl = impl_from_async_file_action_info( iface );
++    return async_file_action_QueryInterface( &impl->IAsyncAction_iface, iid, out );
++}
++
++static ULONG WINAPI async_file_action_info_AddRef( IAsyncInfo *iface )
++{
++    struct async_file_action *impl = impl_from_async_file_action_info( iface );
++    return async_file_action_AddRef( &impl->IAsyncAction_iface );
++}
++
++static ULONG WINAPI async_file_action_info_Release( IAsyncInfo *iface )
++{
++    struct async_file_action *impl = impl_from_async_file_action_info( iface );
++    return async_file_action_Release( &impl->IAsyncAction_iface );
++}
++
++static HRESULT WINAPI async_file_action_info_GetIids( IAsyncInfo *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncInfo", 27, class_name );
++}
++
++static HRESULT WINAPI async_file_action_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *trust_level )
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_info_get_Id( IAsyncInfo *iface, UINT32 *id )
++{
++    if (!id) return E_INVALIDARG;
++    *id = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
++{
++    struct async_file_action *impl = impl_from_async_file_action_info( iface );
++    if (!status) return E_INVALIDARG;
++    *status = impl->status;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error_code )
++{
++    struct async_file_action *impl = impl_from_async_file_action_info( iface );
++    if (!error_code) return E_INVALIDARG;
++    *error_code = impl->hr;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_info_Cancel( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_action_info_Close( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static const struct IAsyncInfoVtbl async_file_action_info_vtbl =
++{
++    async_file_action_info_QueryInterface,
++    async_file_action_info_AddRef,
++    async_file_action_info_Release,
++    async_file_action_info_GetIids,
++    async_file_action_info_GetRuntimeClassName,
++    async_file_action_info_GetTrustLevel,
++    async_file_action_info_get_Id,
++    async_file_action_info_get_Status,
++    async_file_action_info_get_ErrorCode,
++    async_file_action_info_Cancel,
++    async_file_action_info_Close,
++};
++
++static HRESULT async_file_action_create( HRESULT hr, AsyncStatus status, IAsyncAction **out )
++{
++    struct async_file_action *impl;
++    if (!out) return E_INVALIDARG;
++    *out = NULL;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->IAsyncAction_iface.lpVtbl = &async_file_action_vtbl;
++    impl->IAsyncInfo_iface.lpVtbl = &async_file_action_info_vtbl;
++    impl->ref = 1;
++    impl->hr = hr;
++    impl->status = status;
++    *out = &impl->IAsyncAction_iface;
++    TRACE( "created async_file_action %p, hr %#lx, status %d\n", *out, hr, status );
++    return S_OK;
++}
++
++/*
++ * AsyncOperation<HSTRING> for FileIO
++ */
++struct async_file_hstring
++{
++    IAsyncOperation_HSTRING IAsyncOperation_HSTRING_iface;
++    IAsyncInfo IAsyncInfo_iface;
++    LONG ref;
++    HRESULT hr;
++    AsyncStatus status;
++    HSTRING result;
++    IAsyncOperationCompletedHandler_HSTRING *handler;
++};
++
++static inline struct async_file_hstring *impl_from_IAsyncOperation_HSTRING( IAsyncOperation_HSTRING *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_file_hstring, IAsyncOperation_HSTRING_iface );
++}
++
++static inline struct async_file_hstring *impl_from_async_file_hstring_info( IAsyncInfo *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_file_hstring, IAsyncInfo_iface );
++}
++
++static HRESULT WINAPI async_file_hstring_QueryInterface( IAsyncOperation_HSTRING *iface, REFIID iid, void **out )
++{
++    struct async_file_hstring *impl = impl_from_IAsyncOperation_HSTRING( iface );
++    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
++
++    if (!out) return E_POINTER;
++    *out = NULL;
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IAsyncOperation_HSTRING ))
++    {
++        *out = &impl->IAsyncOperation_HSTRING_iface;
++        IAsyncOperation_HSTRING_AddRef( iface );
++        return S_OK;
++    }
++
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        *out = &impl->IAsyncInfo_iface;
++        IAsyncOperation_HSTRING_AddRef( iface );
++        return S_OK;
++    }
++
++    WARN( "unsupported iid %s\n", debugstr_guid( iid ) );
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI async_file_hstring_AddRef( IAsyncOperation_HSTRING *iface )
++{
++    struct async_file_hstring *impl = impl_from_IAsyncOperation_HSTRING( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI async_file_hstring_Release( IAsyncOperation_HSTRING *iface )
++{
++    struct async_file_hstring *impl = impl_from_IAsyncOperation_HSTRING( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->result) WindowsDeleteString( impl->result );
++        if (impl->handler) IAsyncOperationCompletedHandler_HSTRING_Release( impl->handler );
++        free( impl );
++    }
++    return ref;
++}
++
++static HRESULT WINAPI async_file_hstring_GetIids( IAsyncOperation_HSTRING *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_GetRuntimeClassName( IAsyncOperation_HSTRING *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<String>", 43, class_name );
++}
++
++static HRESULT WINAPI async_file_hstring_GetTrustLevel( IAsyncOperation_HSTRING *iface, TrustLevel *trust_level )
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_put_Completed( IAsyncOperation_HSTRING *iface, IAsyncOperationCompletedHandler_HSTRING *handler )
++{
++    struct async_file_hstring *impl = impl_from_IAsyncOperation_HSTRING( iface );
++    TRACE( "iface %p, handler %p.\n", iface, handler );
++
++    if (impl->handler) IAsyncOperationCompletedHandler_HSTRING_Release( impl->handler );
++    if ((impl->handler = handler)) IAsyncOperationCompletedHandler_HSTRING_AddRef( handler );
++
++    if (handler)
++        IAsyncOperationCompletedHandler_HSTRING_Invoke( handler, &impl->IAsyncOperation_HSTRING_iface, impl->status );
++
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_get_Completed( IAsyncOperation_HSTRING *iface, IAsyncOperationCompletedHandler_HSTRING **handler )
++{
++    struct async_file_hstring *impl = impl_from_IAsyncOperation_HSTRING( iface );
++    if (!handler) return E_POINTER;
++    *handler = impl->handler;
++    if (*handler) IAsyncOperationCompletedHandler_HSTRING_AddRef( *handler );
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_GetResults( IAsyncOperation_HSTRING *iface, HSTRING *results )
++{
++    struct async_file_hstring *impl = impl_from_IAsyncOperation_HSTRING( iface );
++    TRACE( "iface %p, results %p.\n", iface, results );
++    if (!results) return E_POINTER;
++    if (impl->result)
++        return WindowsDuplicateString( impl->result, results );
++    *results = NULL;
++    return impl->hr;
++}
++
++static const struct IAsyncOperation_HSTRINGVtbl async_file_hstring_vtbl =
++{
++    async_file_hstring_QueryInterface,
++    async_file_hstring_AddRef,
++    async_file_hstring_Release,
++    async_file_hstring_GetIids,
++    async_file_hstring_GetRuntimeClassName,
++    async_file_hstring_GetTrustLevel,
++    async_file_hstring_put_Completed,
++    async_file_hstring_get_Completed,
++    async_file_hstring_GetResults,
++};
++
++static HRESULT WINAPI async_file_hstring_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
++{
++    struct async_file_hstring *impl = impl_from_async_file_hstring_info( iface );
++    return async_file_hstring_QueryInterface( &impl->IAsyncOperation_HSTRING_iface, iid, out );
++}
++
++static ULONG WINAPI async_file_hstring_info_AddRef( IAsyncInfo *iface )
++{
++    struct async_file_hstring *impl = impl_from_async_file_hstring_info( iface );
++    return async_file_hstring_AddRef( &impl->IAsyncOperation_HSTRING_iface );
++}
++
++static ULONG WINAPI async_file_hstring_info_Release( IAsyncInfo *iface )
++{
++    struct async_file_hstring *impl = impl_from_async_file_hstring_info( iface );
++    return async_file_hstring_Release( &impl->IAsyncOperation_HSTRING_iface );
++}
++
++static HRESULT WINAPI async_file_hstring_info_GetIids( IAsyncInfo *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Foundation.IAsyncInfo", 27, class_name );
++}
++
++static HRESULT WINAPI async_file_hstring_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *trust_level )
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_info_get_Id( IAsyncInfo *iface, UINT32 *id )
++{
++    if (!id) return E_INVALIDARG;
++    *id = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
++{
++    struct async_file_hstring *impl = impl_from_async_file_hstring_info( iface );
++    if (!status) return E_INVALIDARG;
++    *status = impl->status;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error_code )
++{
++    struct async_file_hstring *impl = impl_from_async_file_hstring_info( iface );
++    if (!error_code) return E_INVALIDARG;
++    *error_code = impl->hr;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_info_Cancel( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI async_file_hstring_info_Close( IAsyncInfo *iface )
++{
++    return S_OK;
++}
++
++static const struct IAsyncInfoVtbl async_file_hstring_info_vtbl =
++{
++    async_file_hstring_info_QueryInterface,
++    async_file_hstring_info_AddRef,
++    async_file_hstring_info_Release,
++    async_file_hstring_info_GetIids,
++    async_file_hstring_info_GetRuntimeClassName,
++    async_file_hstring_info_GetTrustLevel,
++    async_file_hstring_info_get_Id,
++    async_file_hstring_info_get_Status,
++    async_file_hstring_info_get_ErrorCode,
++    async_file_hstring_info_Cancel,
++    async_file_hstring_info_Close,
++};
++
++static HRESULT async_file_hstring_create( HSTRING result, HRESULT hr, AsyncStatus status, IAsyncOperation_HSTRING **out )
++{
++    struct async_file_hstring *impl;
++    if (!out) return E_INVALIDARG;
++    *out = NULL;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->IAsyncOperation_HSTRING_iface.lpVtbl = &async_file_hstring_vtbl;
++    impl->IAsyncInfo_iface.lpVtbl = &async_file_hstring_info_vtbl;
++    impl->ref = 1;
++    impl->hr = hr;
++    impl->status = status;
++    impl->result = result;
++    *out = &impl->IAsyncOperation_HSTRING_iface;
++    TRACE( "created async_file_hstring %p, result %s, hr %#lx, status %d\n", *out, debugstr_hstring(result), hr, status );
++    return S_OK;
++}
++
++/*
++ * FileIO helper functions
++ */
++static HRESULT get_storage_file_path( IStorageFile *file, WCHAR *path, DWORD size )
++{
++    IStorageItem *item = NULL;
++    HSTRING path_hstring = NULL;
++    const WCHAR *str;
++    HRESULT hr;
++
++    if (!file) return E_INVALIDARG;
++
++    hr = IStorageFile_QueryInterface( file, &IID_IStorageItem, (void **)&item );
++    if (FAILED(hr))
++    {
++        WARN( "Failed to query IStorageItem from file %p: %#lx\n", file, hr );
++        return hr;
++    }
++
++    hr = IStorageItem_get_Path( item, &path_hstring );
++    IStorageItem_Release( item );
++    if (FAILED(hr))
++    {
++        WARN( "Failed to get path from storage item: %#lx\n", hr );
++        return hr;
++    }
++
++    str = WindowsGetStringRawBuffer( path_hstring, NULL );
++    if (!str || !str[0])
++    {
++        WARN( "Empty path returned for storage file %p\n", file );
++        WindowsDeleteString( path_hstring );
++        return E_FAIL;
++    }
++
++    lstrcpynW( path, str, size );
++    WindowsDeleteString( path_hstring );
++    return S_OK;
++}
++
++static HRESULT file_io_write_text_sync( const WCHAR *path, HSTRING contents, UINT32 encoding )
++{
++    HANDLE handle;
++    DWORD written;
++    UINT32 len = 0;
++    const WCHAR *str = WindowsGetStringRawBuffer( contents, &len );
++
++    handle = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
++    if (handle == INVALID_HANDLE_VALUE)
++    {
++        DWORD err = GetLastError();
++        WARN( "CreateFileW(%s) failed: %lu\n", debugstr_w(path), err );
++        return HRESULT_FROM_WIN32( err );
++    }
++
++    if (len > 0 && str)
++    {
++        if (encoding == 1 /* Utf16LE */)
++        {
++            WriteFile( handle, str, len * sizeof(WCHAR), &written, NULL );
++        }
++        else
++        {
++            /* Default UTF-8 */
++            int utf8_len = WideCharToMultiByte( CP_UTF8, 0, str, len, NULL, 0, NULL, NULL );
++            if (utf8_len > 0)
++            {
++                char *utf8_buf = malloc( utf8_len );
++                if (utf8_buf)
++                {
++                    WideCharToMultiByte( CP_UTF8, 0, str, len, utf8_buf, utf8_len, NULL, NULL );
++                    WriteFile( handle, utf8_buf, utf8_len, &written, NULL );
++                    free( utf8_buf );
++                }
++            }
++        }
++    }
++
++    CloseHandle( handle );
++    return S_OK;
++}
++
++static HRESULT file_io_read_text_sync( const WCHAR *path, UINT32 encoding, HSTRING *out_str )
++{
++    HANDLE handle;
++    DWORD file_size, read_bytes;
++    BYTE *buf;
++    HRESULT hr = S_OK;
++
++    if (!out_str) return E_POINTER;
++    *out_str = NULL;
++
++    handle = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
++    if (handle == INVALID_HANDLE_VALUE)
++    {
++        DWORD err = GetLastError();
++        WARN( "CreateFileW(%s) failed: %lu\n", debugstr_w(path), err );
++        return HRESULT_FROM_WIN32( err );
++    }
++
++    file_size = GetFileSize( handle, NULL );
++    if (file_size == INVALID_FILE_SIZE)
++    {
++        CloseHandle( handle );
++        return HRESULT_FROM_WIN32( GetLastError() );
++    }
++
++    if (file_size == 0)
++    {
++        CloseHandle( handle );
++        return WindowsCreateString( L"", 0, out_str );
++    }
++
++    buf = malloc( file_size + 2 );
++    if (!buf)
++    {
++        CloseHandle( handle );
++        return E_OUTOFMEMORY;
++    }
++
++    if (!ReadFile( handle, buf, file_size, &read_bytes, NULL ))
++    {
++        DWORD err = GetLastError();
++        free( buf );
++        CloseHandle( handle );
++        return HRESULT_FROM_WIN32( err );
++    }
++    CloseHandle( handle );
++
++    /* Check for BOM */
++    if (read_bytes >= 3 && buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf)
++    {
++        int wlen = MultiByteToWideChar( CP_UTF8, 0, (char *)(buf + 3), read_bytes - 3, NULL, 0 );
++        WCHAR *wbuf = malloc( (wlen + 1) * sizeof(WCHAR) );
++        if (wbuf)
++        {
++            MultiByteToWideChar( CP_UTF8, 0, (char *)(buf + 3), read_bytes - 3, wbuf, wlen );
++            wbuf[wlen] = 0;
++            hr = WindowsCreateString( wbuf, wlen, out_str );
++            free( wbuf );
++        }
++        else hr = E_OUTOFMEMORY;
++    }
++    else if (read_bytes >= 2 && buf[0] == 0xff && buf[1] == 0xfe)
++    {
++        int wlen = (read_bytes - 2) / sizeof(WCHAR);
++        hr = WindowsCreateString( (WCHAR *)(buf + 2), wlen, out_str );
++    }
++    else if (encoding == 1 /* Utf16LE */)
++    {
++        int wlen = read_bytes / sizeof(WCHAR);
++        hr = WindowsCreateString( (WCHAR *)buf, wlen, out_str );
++    }
++    else
++    {
++        int wlen = MultiByteToWideChar( CP_UTF8, 0, (char *)buf, read_bytes, NULL, 0 );
++        WCHAR *wbuf = malloc( (wlen + 1) * sizeof(WCHAR) );
++        if (wbuf)
++        {
++            MultiByteToWideChar( CP_UTF8, 0, (char *)buf, read_bytes, wbuf, wlen );
++            wbuf[wlen] = 0;
++            hr = WindowsCreateString( wbuf, wlen, out_str );
++            free( wbuf );
++        }
++        else hr = E_OUTOFMEMORY;
++    }
++
++    free( buf );
++    return hr;
++}
++
++/*
++ * FileIO Statics implementation
++ */
++struct file_io_statics
++{
++    IActivationFactory IActivationFactory_iface;
++    IFileIOStatics IFileIOStatics_iface;
++    LONG ref;
++};
++
++static inline struct file_io_statics *impl_from_file_io_statics_factory( IActivationFactory *iface )
++{
++    return CONTAINING_RECORD( iface, struct file_io_statics, IActivationFactory_iface );
++}
++
++static inline struct file_io_statics *impl_from_IFileIOStatics( IFileIOStatics *iface )
++{
++    return CONTAINING_RECORD( iface, struct file_io_statics, IFileIOStatics_iface );
++}
++
++static HRESULT WINAPI file_io_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
++{
++    struct file_io_statics *impl = impl_from_file_io_statics_factory( iface );
++    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
++
++    if (!out) return E_POINTER;
++    *out = NULL;
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ))
++    {
++        *out = &impl->IActivationFactory_iface;
++        IActivationFactory_AddRef( iface );
++        return S_OK;
++    }
++
++    if (IsEqualGUID( iid, &IID_IFileIOStatics ))
++    {
++        *out = &impl->IFileIOStatics_iface;
++        IActivationFactory_AddRef( iface );
++        return S_OK;
++    }
++
++    WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI file_io_factory_AddRef( IActivationFactory *iface )
++{
++    struct file_io_statics *impl = impl_from_file_io_statics_factory( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI file_io_factory_Release( IActivationFactory *iface )
++{
++    struct file_io_statics *impl = impl_from_file_io_statics_factory( iface );
++    return InterlockedDecrement( &impl->ref );
++}
++
++static HRESULT WINAPI file_io_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI file_io_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Storage.FileIO", 22, class_name );
++}
++
++static HRESULT WINAPI file_io_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI file_io_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
++{
++    if (instance) *instance = NULL;
++    return E_NOTIMPL;
++}
++
++static const struct IActivationFactoryVtbl file_io_factory_vtbl =
++{
++    file_io_factory_QueryInterface,
++    file_io_factory_AddRef,
++    file_io_factory_Release,
++    file_io_factory_GetIids,
++    file_io_factory_GetRuntimeClassName,
++    file_io_factory_GetTrustLevel,
++    file_io_factory_ActivateInstance,
++};
++
++static HRESULT WINAPI file_io_statics_QueryInterface( IFileIOStatics *iface, REFIID iid, void **out )
++{
++    struct file_io_statics *impl = impl_from_IFileIOStatics( iface );
++    return file_io_factory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
++}
++
++static ULONG WINAPI file_io_statics_AddRef( IFileIOStatics *iface )
++{
++    struct file_io_statics *impl = impl_from_IFileIOStatics( iface );
++    return file_io_factory_AddRef( &impl->IActivationFactory_iface );
++}
++
++static ULONG WINAPI file_io_statics_Release( IFileIOStatics *iface )
++{
++    struct file_io_statics *impl = impl_from_IFileIOStatics( iface );
++    return file_io_factory_Release( &impl->IActivationFactory_iface );
++}
++
++static HRESULT WINAPI file_io_statics_GetIids( IFileIOStatics *iface, ULONG *iid_count, IID **iids )
++{
++    if (iid_count) *iid_count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI file_io_statics_GetRuntimeClassName( IFileIOStatics *iface, HSTRING *class_name )
++{
++    return WindowsCreateString( L"Windows.Storage.FileIO", 22, class_name );
++}
++
++static HRESULT WINAPI file_io_statics_GetTrustLevel( IFileIOStatics *iface, TrustLevel *trust_level )
++{
++    if (!trust_level) return E_INVALIDARG;
++    *trust_level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI file_io_statics_WriteTextWithEncodingAsync( IFileIOStatics *iface, IStorageFile *file,
++    HSTRING contents, UINT32 encoding, IAsyncAction **operation )
++{
++    WCHAR path[MAX_PATH];
++    HRESULT hr;
++
++    TRACE( "iface %p, file %p, contents %s, encoding %u, operation %p.\n",
++           iface, file, debugstr_hstring( contents ), encoding, operation );
++
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    hr = get_storage_file_path( file, path, ARRAY_SIZE(path) );
++    if (FAILED(hr))
++    {
++        WARN( "failed to get path from file %p: %#lx\n", file, hr );
++        return async_file_action_create( hr, Error, operation );
++    }
++
++    hr = file_io_write_text_sync( path, contents, encoding );
++    return async_file_action_create( hr, SUCCEEDED(hr) ? Completed : Error, operation );
++}
++
++static HRESULT WINAPI file_io_statics_WriteTextAsync( IFileIOStatics *iface, IStorageFile *file,
++    HSTRING contents, IAsyncAction **operation )
++{
++    return file_io_statics_WriteTextWithEncodingAsync( iface, file, contents, 0 /* Utf8 */, operation );
++}
++
++static HRESULT WINAPI file_io_statics_ReadTextWithEncodingAsync( IFileIOStatics *iface, IStorageFile *file,
++    UINT32 encoding, IAsyncOperation_HSTRING **operation )
++{
++    WCHAR path[MAX_PATH];
++    HSTRING result = NULL;
++    HRESULT hr;
++
++    TRACE( "iface %p, file %p, encoding %u, operation %p.\n",
++           iface, file, encoding, operation );
++
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    hr = get_storage_file_path( file, path, ARRAY_SIZE(path) );
++    if (FAILED(hr))
++    {
++        WARN( "failed to get path from file %p: %#lx\n", file, hr );
++        return async_file_hstring_create( NULL, hr, Error, operation );
++    }
++
++    hr = file_io_read_text_sync( path, encoding, &result );
++    return async_file_hstring_create( result, hr, SUCCEEDED(hr) ? Completed : Error, operation );
++}
++
++static HRESULT WINAPI file_io_statics_ReadTextAsync( IFileIOStatics *iface, IStorageFile *file,
++    IAsyncOperation_HSTRING **operation )
++{
++    return file_io_statics_ReadTextWithEncodingAsync( iface, file, 0 /* Utf8 */, operation );
++}
++
++static HRESULT WINAPI file_io_statics_AppendTextWithEncodingAsync( IFileIOStatics *iface, IStorageFile *file,
++    HSTRING contents, UINT32 encoding, IAsyncAction **operation )
++{
++    WCHAR path[MAX_PATH];
++    HRESULT hr;
++    HANDLE handle;
++    DWORD written;
++    UINT32 len = 0;
++    const WCHAR *str = WindowsGetStringRawBuffer( contents, &len );
++
++    TRACE( "iface %p, file %p, contents %s, encoding %u, operation %p.\n",
++           iface, file, debugstr_hstring( contents ), encoding, operation );
++
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    hr = get_storage_file_path( file, path, ARRAY_SIZE(path) );
++    if (FAILED(hr))
++        return async_file_action_create( hr, Error, operation );
++
++    handle = CreateFileW( path, FILE_APPEND_DATA, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
++    if (handle == INVALID_HANDLE_VALUE)
++        return async_file_action_create( HRESULT_FROM_WIN32(GetLastError()), Error, operation );
++
++    if (len > 0 && str)
++    {
++        if (encoding == 1 /* Utf16LE */)
++        {
++            WriteFile( handle, str, len * sizeof(WCHAR), &written, NULL );
++        }
++        else
++        {
++            int utf8_len = WideCharToMultiByte( CP_UTF8, 0, str, len, NULL, 0, NULL, NULL );
++            if (utf8_len > 0)
++            {
++                char *utf8_buf = malloc( utf8_len );
++                if (utf8_buf)
++                {
++                    WideCharToMultiByte( CP_UTF8, 0, str, len, utf8_buf, utf8_len, NULL, NULL );
++                    WriteFile( handle, utf8_buf, utf8_len, &written, NULL );
++                    free( utf8_buf );
++                }
++            }
++        }
++    }
++    CloseHandle( handle );
++
++    return async_file_action_create( S_OK, Completed, operation );
++}
++
++static HRESULT WINAPI file_io_statics_AppendTextAsync( IFileIOStatics *iface, IStorageFile *file,
++    HSTRING contents, IAsyncAction **operation )
++{
++    return file_io_statics_AppendTextWithEncodingAsync( iface, file, contents, 0, operation );
++}
++
++static HRESULT WINAPI file_io_statics_ReadLinesAsync( IFileIOStatics *iface, IStorageFile *file, void **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_ReadLinesWithEncodingAsync( IFileIOStatics *iface, IStorageFile *file, UINT32 encoding, void **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_WriteLinesAsync( IFileIOStatics *iface, IStorageFile *file, void *lines, IAsyncAction **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_WriteLinesWithEncodingAsync( IFileIOStatics *iface, IStorageFile *file, void *lines, UINT32 encoding, IAsyncAction **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_AppendLinesAsync( IFileIOStatics *iface, IStorageFile *file, void *lines, IAsyncAction **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_AppendLinesWithEncodingAsync( IFileIOStatics *iface, IStorageFile *file, void *lines, UINT32 encoding, IAsyncAction **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_ReadBufferAsync( IFileIOStatics *iface, IStorageFile *file, void **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_WriteBufferAsync( IFileIOStatics *iface, IStorageFile *file, void *buffer, IAsyncAction **operation )
++{
++    FIXME( "stub!\n" );
++    return E_NOTIMPL;
++}
++
++static HRESULT WINAPI file_io_statics_WriteBytesAsync( IFileIOStatics *iface, IStorageFile *file,
++    UINT32 count, BYTE *buffer, IAsyncAction **operation )
++{
++    WCHAR path[MAX_PATH];
++    HRESULT hr;
++    HANDLE handle;
++    DWORD written;
++
++    TRACE( "iface %p, file %p, count %u, buffer %p, operation %p.\n",
++           iface, file, count, buffer, operation );
++
++    if (!operation) return E_INVALIDARG;
++    *operation = NULL;
++
++    hr = get_storage_file_path( file, path, ARRAY_SIZE(path) );
++    if (FAILED(hr))
++        return async_file_action_create( hr, Error, operation );
++
++    handle = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
++    if (handle == INVALID_HANDLE_VALUE)
++        return async_file_action_create( HRESULT_FROM_WIN32(GetLastError()), Error, operation );
++
++    if (count > 0 && buffer)
++        WriteFile( handle, buffer, count, &written, NULL );
++
++    CloseHandle( handle );
++    return async_file_action_create( S_OK, Completed, operation );
++}
++
++static const struct IFileIOStaticsVtbl file_io_statics_vtbl =
++{
++    file_io_statics_QueryInterface,
++    file_io_statics_AddRef,
++    file_io_statics_Release,
++    /* IInspectable methods */
++    file_io_statics_GetIids,
++    file_io_statics_GetRuntimeClassName,
++    file_io_statics_GetTrustLevel,
++    /* IFileIOStatics methods */
++    file_io_statics_ReadTextAsync,
++    file_io_statics_ReadTextWithEncodingAsync,
++    file_io_statics_WriteTextAsync,
++    file_io_statics_WriteTextWithEncodingAsync,
++    file_io_statics_AppendTextAsync,
++    file_io_statics_AppendTextWithEncodingAsync,
++    file_io_statics_ReadLinesAsync,
++    file_io_statics_ReadLinesWithEncodingAsync,
++    file_io_statics_WriteLinesAsync,
++    file_io_statics_WriteLinesWithEncodingAsync,
++    file_io_statics_AppendLinesAsync,
++    file_io_statics_AppendLinesWithEncodingAsync,
++    file_io_statics_ReadBufferAsync,
++    file_io_statics_WriteBufferAsync,
++    file_io_statics_WriteBytesAsync,
++};
++
++static struct file_io_statics file_io_statics =
++{
++    {&file_io_factory_vtbl},
++    {&file_io_statics_vtbl},
++    1,
++};
++
++IActivationFactory *file_io_factory = &file_io_statics.IActivationFactory_iface;
+diff --git a/dlls/windows.storage/main.c b/dlls/windows.storage/main.c
+index f5f23920e5c..13c16410ed7 100644
+--- a/dlls/windows.storage/main.c
++++ b/dlls/windows.storage/main.c
+@@ -43,6 +43,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
+     if (!wcscmp( buffer, L"Windows.Storage.StorageFile" ) ||
+         !wcscmp( buffer, RuntimeClass_Windows_Storage_StorageFile ))
+         IActivationFactory_QueryInterface( storage_file_factory, &IID_IActivationFactory, (void **)factory );
++    if (!wcscmp( buffer, L"Windows.Storage.FileIO" ))
++        IActivationFactory_QueryInterface( file_io_factory, &IID_IActivationFactory, (void **)factory );
+ 
+     if (*factory) return S_OK;
+     return CLASS_E_CLASSNOTAVAILABLE;
+diff --git a/dlls/windows.storage/private.h b/dlls/windows.storage/private.h
+index 3ac9e7ddefa..3bcd8f94964 100644
+--- a/dlls/windows.storage/private.h
++++ b/dlls/windows.storage/private.h
+@@ -51,6 +51,7 @@ HRESULT async_operation_boolean_create( IUnknown *invoker, IUnknown *param, asyn
+ extern IActivationFactory *random_access_stream_reference_factory;
+ extern IActivationFactory *memory_stream_activation_factory;
+ extern IActivationFactory *storage_file_factory;
++extern IActivationFactory *file_io_factory;
+ 
+ HRESULT memory_stream_from_file( const WCHAR *path, const WCHAR *content_type, IRandomAccessStream **out );
+ 
+diff --git a/dlls/windows.ui.xaml/application.c b/dlls/windows.ui.xaml/application.c
+index 0b5faae69a6..7375846892a 100644
+--- a/dlls/windows.ui.xaml/application.c
++++ b/dlls/windows.ui.xaml/application.c
+@@ -2038,7 +2038,29 @@ static HRESULT WINAPI disp_get_HasThreadAccess(void *This, boolean *value)
+     }
+     return S_OK;
+ }
+-static HRESULT WINAPI disp_ProcessEvents(void *This, int options) { return S_OK; }
++static HRESULT WINAPI disp_ProcessEvents(void *This, int options)
++{
++    MSG msg;
++    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
++    {
++        if (msg.message == WM_APP + 10 && msg.wParam)
++        {
++            void *cb = (void *)msg.wParam;
++            void **cb_vtbl = cb ? *(void ***)cb : NULL;
++            if (cb_vtbl && (uintptr_t)cb_vtbl[3] > 0x10000)
++            {
++                HRESULT (WINAPI *pInvoke)(void *) = (void *)cb_vtbl[3];
++                pInvoke(cb);
++            }
++            IUnknown_Release((IUnknown *)cb);
++            continue;
++        }
++        TranslateMessage(&msg);
++        DispatchMessageW(&msg);
++        if (options == 2 /* ProcessOneIfPresent */) break;
++    }
++    return S_OK;
++}
+ static HRESULT WINAPI disp_RunAsync(void *This, int priority, void *callback, void **action)
+ {
+     DWORD target_thread = xaml_ui_thread_id ? xaml_ui_thread_id : GetCurrentThreadId();
+@@ -2493,19 +2515,6 @@ static const void *vis_core_args_vtbl[8] = {
+     (void *)vis_core_get_Handled, (void *)vis_core_put_Handled
+ };
+ 
+-struct typed_event_handler_vtbl
+-{
+-    HRESULT (WINAPI *QueryInterface)(void *This, REFIID riid, void **ppv);
+-    ULONG (WINAPI *AddRef)(void *This);
+-    ULONG (WINAPI *Release)(void *This);
+-    HRESULT (WINAPI *Invoke)(void *This, void *sender, void *args);
+-};
+-
+-struct typed_event_handler
+-{
+-    const struct typed_event_handler_vtbl *lpVtbl;
+-};
+-
+ void core_window_fire_size_changed(FLOAT width, FLOAT height)
+ {
+     struct core_window_impl *impl;
+@@ -2958,6 +2967,63 @@ static const void *pointer_properties_vtbl[30] = {
+     (void *)props_HasUsage, (void *)props_GetUsageValue
+ };
+ 
++static const GUID IID_IPointerDevice = {0x93c9bafc, 0xebcb, 0x467e, {0x82, 0xc6, 0x27, 0x6f, 0xea, 0xe3, 0x6b, 0x5a}};
++
++struct pointer_device_impl
++{
++    struct { const void *lpVtbl; } IPointerDevice_iface;
++    LONG ref;
++    UINT32 device_type; /* 2 = Mouse */
++};
++
++#define impl_from_IPointerDevice(ptr) ((struct pointer_device_impl *)((char *)(ptr) - offsetof(struct pointer_device_impl, IPointerDevice_iface)))
++
++static HRESULT WINAPI pdev_QI(void *This, REFIID riid, void **ppv)
++{
++    struct pointer_device_impl *impl = impl_from_IPointerDevice(This);
++    if (!ppv) return E_POINTER;
++    *ppv = NULL;
++    if (IsEqualGUID(riid, &IID_IUnknown) ||
++        IsEqualGUID(riid, &IID_IInspectable) ||
++        IsEqualGUID(riid, &IID_IAgileObject) ||
++        IsEqualGUID(riid, &IID_IPointerDevice))
++    {
++        *ppv = &impl->IPointerDevice_iface;
++        InterlockedIncrement(&impl->ref);
++        return S_OK;
++    }
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI pdev_AddRef(void *This) { return InterlockedIncrement(&impl_from_IPointerDevice(This)->ref); }
++static ULONG WINAPI pdev_Release(void *This)
++{
++    struct pointer_device_impl *impl = impl_from_IPointerDevice(This);
++    ULONG ref = InterlockedDecrement(&impl->ref);
++    if (!ref) free(impl);
++    return ref;
++}
++static HRESULT WINAPI pdev_GetIids(void *This, ULONG *c, IID **i) { if (c) *c = 0; return S_OK; }
++static HRESULT WINAPI pdev_GetRuntimeClassName(void *This, HSTRING *n) { return WindowsCreateString(L"Windows.Devices.Input.PointerDevice", 35, n); }
++static HRESULT WINAPI pdev_GetTrustLevel(void *This, TrustLevel *t) { if (t) *t = BaseTrust; return S_OK; }
++static HRESULT WINAPI pdev_get_PointerDeviceType(void *This, UINT32 *value)
++{
++    struct pointer_device_impl *impl = impl_from_IPointerDevice(This);
++    if (value) *value = impl->device_type;
++    return S_OK;
++}
++static HRESULT WINAPI pdev_get_IsIntegrated(void *This, boolean *value) { if (value) *value = FALSE; return S_OK; }
++static HRESULT WINAPI pdev_get_MaxContacts(void *This, UINT32 *value) { if (value) *value = 1; return S_OK; }
++static HRESULT WINAPI pdev_get_PhysicalDeviceRect(void *This, void *value) { if (value) memset(value, 0, 16); return S_OK; }
++static HRESULT WINAPI pdev_get_ScreenRect(void *This, void *value) { if (value) memset(value, 0, 16); return S_OK; }
++static HRESULT WINAPI pdev_get_SupportedUsages(void *This, void **value) { if (value) *value = NULL; return S_OK; }
++
++static const void *pointer_device_vtbl[12] = {
++    (void *)pdev_QI, (void *)pdev_AddRef, (void *)pdev_Release,
++    (void *)pdev_GetIids, (void *)pdev_GetRuntimeClassName, (void *)pdev_GetTrustLevel,
++    (void *)pdev_get_PointerDeviceType, (void *)pdev_get_IsIntegrated, (void *)pdev_get_MaxContacts,
++    (void *)pdev_get_PhysicalDeviceRect, (void *)pdev_get_ScreenRect, (void *)pdev_get_SupportedUsages
++};
++
+ /* IPointerPoint implementation */
+ struct pointer_point_impl
+ {
+@@ -2966,6 +3032,7 @@ struct pointer_point_impl
+     FLOAT x, y;
+     boolean in_contact;
+     struct pointer_properties_impl *props;
++    struct pointer_device_impl *device;
+ };
+ 
+ #define impl_from_IPointerPoint(ptr) ((struct pointer_point_impl *)((char *)(ptr) - offsetof(struct pointer_point_impl, IPointerPoint_iface)))
+@@ -2994,6 +3061,7 @@ static ULONG WINAPI pt_Release(void *This)
+     if (!ref)
+     {
+         if (impl->props) props_Release(&impl->props->IPointerPointProperties_iface);
++        if (impl->device) pdev_Release(&impl->device->IPointerDevice_iface);
+         free(impl);
+     }
+     return ref;
+@@ -3001,7 +3069,18 @@ static ULONG WINAPI pt_Release(void *This)
+ static HRESULT WINAPI pt_GetIids(void *This, ULONG *c, IID **i) { if (c) *c = 0; return S_OK; }
+ static HRESULT WINAPI pt_GetRuntimeClassName(void *This, HSTRING *n) { return WindowsCreateString(L"Windows.UI.Input.PointerPoint", 30, n); }
+ static HRESULT WINAPI pt_GetTrustLevel(void *This, TrustLevel *t) { if (t) *t = BaseTrust; return S_OK; }
+-static HRESULT WINAPI pt_get_PointerDevice(void *This, void **value) { if (value) *value = NULL; return S_OK; }
++static HRESULT WINAPI pt_get_PointerDevice(void *This, void **value)
++{
++    struct pointer_point_impl *impl = impl_from_IPointerPoint(This);
++    if (!value) return E_POINTER;
++    *value = NULL;
++    if (impl->device)
++    {
++        *value = &impl->device->IPointerDevice_iface;
++        pdev_AddRef(&impl->device->IPointerDevice_iface);
++    }
++    return S_OK;
++}
+ static HRESULT WINAPI pt_get_Position(void *This, struct winrt_Point *value)
+ {
+     struct pointer_point_impl *impl = impl_from_IPointerPoint(This);
+@@ -3145,6 +3224,7 @@ void core_window_fire_pointer(UINT msg, WPARAM wparam, LPARAM lparam)
+     struct pointer_event_args_impl *args;
+     struct pointer_point_impl *point;
+     struct pointer_properties_impl *props;
++    struct pointer_device_impl *device;
+     struct core_window_handler *handlers = NULL;
+     int count = 0, i;
+     FLOAT x = (FLOAT)(short)LOWORD(lparam);
+@@ -3198,17 +3278,22 @@ void core_window_fire_pointer(UINT msg, WPARAM wparam, LPARAM lparam)
+             return;
+     }
+ 
+-    if (count <= 0 || !handlers) return;
++    if ((count <= 0 || !handlers) && !core_independent_input_source_has_handlers(msg)) return;
+ 
+     props = calloc(1, sizeof(*props));
+     point = calloc(1, sizeof(*point));
+     args = calloc(1, sizeof(*args));
+-    if (!props || !point || !args)
++    device = calloc(1, sizeof(*device));
++    if (!props || !point || !args || !device)
+     {
+-        free(props); free(point); free(args);
++        free(props); free(point); free(args); free(device);
+         return;
+     }
+ 
++    device->IPointerDevice_iface.lpVtbl = pointer_device_vtbl;
++    device->ref = 1;
++    device->device_type = 2; /* PointerDeviceType::Mouse */
++
+     props->IPointerPointProperties_iface.lpVtbl = pointer_properties_vtbl;
+     props->ref = 1;
+     props->x = x; props->y = y;
+@@ -3220,23 +3305,29 @@ void core_window_fire_pointer(UINT msg, WPARAM wparam, LPARAM lparam)
+     point->x = x; point->y = y;
+     point->in_contact = in_contact;
+     point->props = props;
++    point->device = device;
+ 
+     args->IPointerEventArgs_iface.lpVtbl = pointer_args_vtbl;
+     args->ICoreWindowEventArgs_iface.lpVtbl = pointer_core_args_vtbl;
+     args->ref = 1;
+     args->point = point;
+ 
+-    for (i = 0; i < count; i++)
++    if (handlers && count > 0)
+     {
+-        struct typed_event_handler *h = (struct typed_event_handler *)handlers[i].handler;
+-        if (h && h->lpVtbl && h->lpVtbl->Invoke)
++        for (i = 0; i < count; i++)
+         {
+-            TRACE("Invoking pointer handler[%d] %p (msg=0x%x, pt=%.0f,%.0f, kind=%u)\n",
+-                  i, h, msg, x, y, update_kind);
+-            h->lpVtbl->Invoke(h, global_core_window, &args->IPointerEventArgs_iface);
++            struct typed_event_handler *h = (struct typed_event_handler *)handlers[i].handler;
++            if (h && h->lpVtbl && h->lpVtbl->Invoke)
++            {
++                TRACE("Invoking pointer handler[%d] %p (msg=0x%x, pt=%.0f,%.0f, kind=%u)\n",
++                      i, h, msg, x, y, update_kind);
++                h->lpVtbl->Invoke(h, global_core_window, &args->IPointerEventArgs_iface);
++            }
+         }
+     }
+ 
++    core_independent_input_source_fire_pointer(msg, wparam, lparam, &args->IPointerEventArgs_iface);
++
+     ptr_args_Release(&args->IPointerEventArgs_iface);
+ }
+ 
+diff --git a/dlls/windows.ui.xaml/controls.c b/dlls/windows.ui.xaml/controls.c
+index ee001ce895e..913d0110b01 100644
+--- a/dlls/windows.ui.xaml/controls.c
++++ b/dlls/windows.ui.xaml/controls.c
+@@ -2113,7 +2113,428 @@ static HRESULT WINAPI elem_scp_get_CompositionScaleX(void *This, float *val) { i
+ static HRESULT WINAPI elem_scp_get_CompositionScaleY(void *This, float *val) { if (val) *val = 1.0f; return S_OK; }
+ static HRESULT WINAPI elem_scp_add_CompositionScaleChanged(void *This, void *handler, EventRegistrationToken *token) { if (token) token->value = 1; return S_OK; }
+ static HRESULT WINAPI elem_scp_remove_CompositionScaleChanged(void *This, EventRegistrationToken token) { return S_OK; }
+-static HRESULT WINAPI elem_scp_CreateCoreIndependentInputSource(void *This, int deviceTypes, void **ret) { if (ret) *ret = NULL; return E_NOTIMPL; }
++/* -------------------------------------------------------------------------
++ * CoreIndependentInputSource Implementation
++ * ------------------------------------------------------------------------- */
++static const GUID IID_ICoreInputSourceBase        = {0x9f488807, 0x4580, 0x4be8, {0xbe, 0x68, 0x92, 0xa9, 0x31, 0x17, 0x13, 0xbb}};
++static const GUID IID_ICorePointerInputSource     = {0xbbf1bb18, 0xe47a, 0x48eb, {0x88, 0x07, 0xf8, 0xf8, 0xd3, 0xea, 0x45, 0x51}};
++static const GUID IID_ICorePointerInputSource_Alt = {0xbcf7b858, 0xe4b2, 0x48fb, {0x88, 0x07, 0xf8, 0xf8, 0xd3, 0xea, 0x45, 0x51}};
++
++struct input_handler_entry
++{
++    void *handler;
++    INT64 token;
++};
++
++struct core_independent_input_source
++{
++    struct { const void *lpVtbl; } ICoreInputSourceBase_iface;
++    struct { const void *lpVtbl; } ICorePointerInputSource_iface;
++    LONG ref;
++    struct input_handler_entry pointer_pressed[16];
++    int pointer_pressed_count;
++    struct input_handler_entry pointer_released[16];
++    int pointer_released_count;
++    struct input_handler_entry pointer_moved[16];
++    int pointer_moved_count;
++    struct input_handler_entry pointer_wheel[16];
++    int pointer_wheel_count;
++    INT64 next_token;
++};
++
++#define impl_from_ICoreInputSourceBase(ptr) \
++    ((struct core_independent_input_source *)((char *)(ptr) - offsetof(struct core_independent_input_source, ICoreInputSourceBase_iface)))
++#define impl_from_ICorePointerInputSource(ptr) \
++    ((struct core_independent_input_source *)((char *)(ptr) - offsetof(struct core_independent_input_source, ICorePointerInputSource_iface)))
++
++static struct core_independent_input_source *global_independent_input_source = NULL;
++
++static HRESULT WINAPI input_source_QI(void *This, REFIID riid, void **ppv)
++{
++    struct core_independent_input_source *impl = impl_from_ICoreInputSourceBase(This);
++    if (!ppv) return E_POINTER;
++    if (IsEqualGUID(riid, &IID_IUnknown) ||
++        IsEqualGUID(riid, &IID_IInspectable) ||
++        IsEqualGUID(riid, &IID_ICoreInputSourceBase))
++    {
++        *ppv = &impl->ICoreInputSourceBase_iface;
++        InterlockedIncrement(&impl->ref);
++        return S_OK;
++    }
++    if (IsEqualGUID(riid, &IID_ICorePointerInputSource) ||
++        IsEqualGUID(riid, &IID_ICorePointerInputSource_Alt))
++    {
++        *ppv = &impl->ICorePointerInputSource_iface;
++        InterlockedIncrement(&impl->ref);
++        return S_OK;
++    }
++    TRACE("input_source %p unhandled QI %s\n", impl, debugstr_guid(riid));
++    *ppv = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI input_source_AddRef(void *This)
++{
++    return InterlockedIncrement(&impl_from_ICoreInputSourceBase(This)->ref);
++}
++
++static ULONG WINAPI input_source_Release(void *This)
++{
++    return InterlockedDecrement(&impl_from_ICoreInputSourceBase(This)->ref);
++}
++
++static HRESULT WINAPI input_source_GetIids(void *This, ULONG *count, IID **iids)
++{
++    if (count) *count = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI input_source_GetRuntimeClassName(void *This, HSTRING *className)
++{
++    return WindowsCreateString(L"Windows.UI.Core.CoreIndependentInputSource", 42, className);
++}
++
++static HRESULT WINAPI input_source_GetTrustLevel(void *This, TrustLevel *trustLevel)
++{
++    if (trustLevel) *trustLevel = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI input_source_get_Dispatcher(void *This, void **value)
++{
++    TRACE("CoreIndependentInputSource get_Dispatcher\n");
++    return get_global_dispatcher(value);
++}
++
++static HRESULT WINAPI input_source_get_IsInputEnabled(void *This, boolean *value)
++{
++    if (value) *value = TRUE;
++    return S_OK;
++}
++
++static HRESULT WINAPI input_source_put_IsInputEnabled(void *This, boolean value)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI input_source_add_InputEnabled(void *This, void *handler, EventRegistrationToken *token)
++{
++    if (token) token->value = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI input_source_remove_InputEnabled(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static const void *core_input_source_base_vtbl[] = {
++    (void *)input_source_QI,
++    (void *)input_source_AddRef,
++    (void *)input_source_Release,
++    (void *)input_source_GetIids,
++    (void *)input_source_GetRuntimeClassName,
++    (void *)input_source_GetTrustLevel,
++    (void *)input_source_get_Dispatcher,
++    (void *)input_source_get_IsInputEnabled,
++    (void *)input_source_put_IsInputEnabled,
++    (void *)input_source_add_InputEnabled,
++    (void *)input_source_remove_InputEnabled
++};
++
++/* ICorePointerInputSource implementation */
++static HRESULT WINAPI ptr_input_QI(void *This, REFIID riid, void **ppv)
++{
++    return input_source_QI(&impl_from_ICorePointerInputSource(This)->ICoreInputSourceBase_iface, riid, ppv);
++}
++
++static ULONG WINAPI ptr_input_AddRef(void *This)
++{
++    return input_source_AddRef(&impl_from_ICorePointerInputSource(This)->ICoreInputSourceBase_iface);
++}
++
++static ULONG WINAPI ptr_input_Release(void *This)
++{
++    return input_source_Release(&impl_from_ICorePointerInputSource(This)->ICoreInputSourceBase_iface);
++}
++
++static HRESULT WINAPI ptr_input_get_HasCapture(void *This, boolean *value)
++{
++    if (value) *value = FALSE;
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_get_PointerPosition(void *This, void *value)
++{
++    FLOAT *coords = (FLOAT *)value;
++    if (coords) { coords[0] = 0.0f; coords[1] = 0.0f; }
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_get_PointerCursor(void *This, void **value)
++{
++    if (value) *value = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_put_PointerCursor(void *This, void *value)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_ReleasePointerCapture(void *This)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_SetPointerCapture(void *This)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerCaptureLost(void *This, void *handler, EventRegistrationToken *token)
++{
++    if (token) token->value = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerCaptureLost(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerEntered(void *This, void *handler, EventRegistrationToken *token)
++{
++    if (token) token->value = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerEntered(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerExited(void *This, void *handler, EventRegistrationToken *token)
++{
++    if (token) token->value = 1;
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerExited(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerMoved(void *This, void *handler, EventRegistrationToken *token)
++{
++    struct core_independent_input_source *impl = impl_from_ICorePointerInputSource(This);
++    TRACE("ICorePointerInputSource add_PointerMoved handler=%p\n", handler);
++    if (!handler) return E_POINTER;
++    if (impl->pointer_moved_count < 16)
++    {
++        INT64 tok = ++impl->next_token;
++        impl->pointer_moved[impl->pointer_moved_count].handler = handler;
++        impl->pointer_moved[impl->pointer_moved_count].token = tok;
++        impl->pointer_moved_count++;
++        IUnknown_AddRef((IUnknown *)handler);
++        if (token) token->value = tok;
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerMoved(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerPressed(void *This, void *handler, EventRegistrationToken *token)
++{
++    struct core_independent_input_source *impl = impl_from_ICorePointerInputSource(This);
++    TRACE("ICorePointerInputSource add_PointerPressed handler=%p\n", handler);
++    if (!handler) return E_POINTER;
++    if (impl->pointer_pressed_count < 16)
++    {
++        INT64 tok = ++impl->next_token;
++        impl->pointer_pressed[impl->pointer_pressed_count].handler = handler;
++        impl->pointer_pressed[impl->pointer_pressed_count].token = tok;
++        impl->pointer_pressed_count++;
++        IUnknown_AddRef((IUnknown *)handler);
++        if (token) token->value = tok;
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerPressed(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerReleased(void *This, void *handler, EventRegistrationToken *token)
++{
++    struct core_independent_input_source *impl = impl_from_ICorePointerInputSource(This);
++    TRACE("ICorePointerInputSource add_PointerReleased handler=%p\n", handler);
++    if (!handler) return E_POINTER;
++    if (impl->pointer_released_count < 16)
++    {
++        INT64 tok = ++impl->next_token;
++        impl->pointer_released[impl->pointer_released_count].handler = handler;
++        impl->pointer_released[impl->pointer_released_count].token = tok;
++        impl->pointer_released_count++;
++        IUnknown_AddRef((IUnknown *)handler);
++        if (token) token->value = tok;
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerReleased(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_add_PointerWheelChanged(void *This, void *handler, EventRegistrationToken *token)
++{
++    struct core_independent_input_source *impl = impl_from_ICorePointerInputSource(This);
++    TRACE("ICorePointerInputSource add_PointerWheelChanged handler=%p\n", handler);
++    if (!handler) return E_POINTER;
++    if (impl->pointer_wheel_count < 16)
++    {
++        INT64 tok = ++impl->next_token;
++        impl->pointer_wheel[impl->pointer_wheel_count].handler = handler;
++        impl->pointer_wheel[impl->pointer_wheel_count].token = tok;
++        impl->pointer_wheel_count++;
++        IUnknown_AddRef((IUnknown *)handler);
++        if (token) token->value = tok;
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI ptr_input_remove_PointerWheelChanged(void *This, EventRegistrationToken token)
++{
++    return S_OK;
++}
++
++static const void *core_pointer_input_source_vtbl[] = {
++    (void *)ptr_input_QI,                         /* 0 */
++    (void *)ptr_input_AddRef,                     /* 1 */
++    (void *)ptr_input_Release,                    /* 2 */
++    (void *)input_source_GetIids,                 /* 3 */
++    (void *)input_source_GetRuntimeClassName,     /* 4 */
++    (void *)input_source_GetTrustLevel,           /* 5 */
++    (void *)ptr_input_get_HasCapture,             /* 6 */
++    (void *)ptr_input_get_PointerPosition,        /* 7 */
++    (void *)ptr_input_get_PointerCursor,          /* 8 */
++    (void *)ptr_input_put_PointerCursor,          /* 9 */
++    (void *)ptr_input_ReleasePointerCapture,      /* 10 */
++    (void *)ptr_input_SetPointerCapture,          /* 11 */
++    (void *)ptr_input_add_PointerCaptureLost,     /* 12 */
++    (void *)ptr_input_remove_PointerCaptureLost,  /* 13 */
++    (void *)ptr_input_add_PointerEntered,         /* 14 */
++    (void *)ptr_input_remove_PointerEntered,      /* 15 */
++    (void *)ptr_input_add_PointerExited,          /* 16 */
++    (void *)ptr_input_remove_PointerExited,       /* 17 */
++    (void *)ptr_input_add_PointerMoved,           /* 18 */
++    (void *)ptr_input_remove_PointerMoved,        /* 19 */
++    (void *)ptr_input_add_PointerPressed,         /* 20 */
++    (void *)ptr_input_remove_PointerPressed,      /* 21 */
++    (void *)ptr_input_add_PointerReleased,        /* 22 */
++    (void *)ptr_input_remove_PointerReleased,     /* 23 */
++    (void *)ptr_input_add_PointerWheelChanged,    /* 24 */
++    (void *)ptr_input_remove_PointerWheelChanged  /* 25 */
++};
++
++int core_independent_input_source_has_handlers(UINT msg)
++{
++    struct core_independent_input_source *impl = global_independent_input_source;
++    if (!impl) return 0;
++    switch (msg)
++    {
++        case WM_LBUTTONDOWN:
++        case WM_RBUTTONDOWN:
++        case WM_MBUTTONDOWN:
++            return impl->pointer_pressed_count > 0;
++        case WM_LBUTTONUP:
++        case WM_RBUTTONUP:
++        case WM_MBUTTONUP:
++            return impl->pointer_released_count > 0;
++        case WM_MOUSEMOVE:
++            return impl->pointer_moved_count > 0;
++        case WM_MOUSEWHEEL:
++            return impl->pointer_wheel_count > 0;
++        default:
++            return 0;
++    }
++}
++
++void core_independent_input_source_fire_pointer(UINT msg, WPARAM wparam, LPARAM lparam, void *args)
++{
++    struct core_independent_input_source *impl = global_independent_input_source;
++    struct input_handler_entry *handlers = NULL;
++    int count = 0, i;
++
++    if (!impl || !args) return;
++
++    switch (msg)
++    {
++        case WM_LBUTTONDOWN:
++        case WM_RBUTTONDOWN:
++        case WM_MBUTTONDOWN:
++            handlers = impl->pointer_pressed;
++            count = impl->pointer_pressed_count;
++            break;
++        case WM_LBUTTONUP:
++        case WM_RBUTTONUP:
++        case WM_MBUTTONUP:
++            handlers = impl->pointer_released;
++            count = impl->pointer_released_count;
++            break;
++        case WM_MOUSEMOVE:
++            handlers = impl->pointer_moved;
++            count = impl->pointer_moved_count;
++            break;
++        case WM_MOUSEWHEEL:
++            handlers = impl->pointer_wheel;
++            count = impl->pointer_wheel_count;
++            break;
++        default:
++            return;
++    }
++
++    for (i = 0; i < count; i++)
++    {
++        struct typed_event_handler *h = (struct typed_event_handler *)handlers[i].handler;
++        if (h && h->lpVtbl && h->lpVtbl->Invoke)
++        {
++            TRACE("Invoking independent input handler[%d] %p (msg=0x%x)\n", i, h, msg);
++            h->lpVtbl->Invoke(h, &impl->ICorePointerInputSource_iface, args);
++        }
++    }
++}
++
++static HRESULT create_core_independent_input_source(void **ret)
++{
++    struct core_independent_input_source *impl;
++    if (!ret) return E_POINTER;
++    if (global_independent_input_source)
++    {
++        InterlockedIncrement(&global_independent_input_source->ref);
++        *ret = &global_independent_input_source->ICoreInputSourceBase_iface;
++        return S_OK;
++    }
++    impl = calloc(1, sizeof(*impl));
++    if (!impl) return E_OUTOFMEMORY;
++    impl->ICoreInputSourceBase_iface.lpVtbl = core_input_source_base_vtbl;
++    impl->ICorePointerInputSource_iface.lpVtbl = core_pointer_input_source_vtbl;
++    impl->ref = 10000; /* Persistent singleton */
++    global_independent_input_source = impl;
++    *ret = &impl->ICoreInputSourceBase_iface;
++    return S_OK;
++}
++
++static HRESULT WINAPI elem_scp_CreateCoreIndependentInputSource(void *This, int deviceTypes, void **ret)
++{
++    TRACE("SwapChainPanel %p CreateCoreIndependentInputSource deviceTypes=0x%x, ret=%p\n", This, deviceTypes, ret);
++    return create_core_independent_input_source(ret);
++}
+ 
+ static HRESULT WINAPI elem_scp_native_QI(void *This, REFIID riid, void **ppv) { return elem_QI_internal(impl_from_ISwapChainPanelNative(This), riid, ppv); }
+ static ULONG WINAPI elem_scp_native_AddRef(void *This) { return elem_AddRef_internal(impl_from_ISwapChainPanelNative(This)); }
+diff --git a/dlls/windows.ui.xaml/private.h b/dlls/windows.ui.xaml/private.h
+index f7fcdf34478..40423192169 100644
+--- a/dlls/windows.ui.xaml/private.h
++++ b/dlls/windows.ui.xaml/private.h
+@@ -90,6 +90,22 @@ HRESULT create_menu_flyout_item_instance(const WCHAR *name, void **value);
+ void xaml_fire_swapchain_size_changed(FLOAT width, FLOAT height);
+ LRESULT CALLBACK xaml_window_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+ 
++struct typed_event_handler_vtbl
++{
++    HRESULT (WINAPI *QueryInterface)(void *This, REFIID riid, void **ppv);
++    ULONG (WINAPI *AddRef)(void *This);
++    ULONG (WINAPI *Release)(void *This);
++    HRESULT (WINAPI *Invoke)(void *This, void *sender, void *args);
++};
++
++struct typed_event_handler
++{
++    const struct typed_event_handler_vtbl *lpVtbl;
++};
++
++void core_independent_input_source_fire_pointer(UINT msg, WPARAM wparam, LPARAM lparam, void *args);
++int core_independent_input_source_has_handlers(UINT msg);
++
+ #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
+     static inline impl_type *impl_from( iface_type *iface )                                        \
+     {                                                                                              \
+-- 
+2.56.0
+
